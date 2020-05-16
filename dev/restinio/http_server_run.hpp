@@ -767,36 +767,110 @@ public :
 		,	m_pool{ pool_size, server.io_context() }
 	{}
 
-	//FIXME: maybe this method should be extended in v.0.7.0 with
-	//error-handler specified by user (this error-handler will be called
-	//in err_cb in open_async())?
-	//! Start the server.
+	/*!
+	 * @brief Start the server with callbacks that will be called on
+	 * success or failure.
+	 *
+	 * The @a on_ok should be a function/functor with the format:
+	 * @code
+	 * void () noexcept;
+	 * @endcode
+	 *
+	 * The @a on_error should be a function/functor with the format:
+	 * @code
+	 * void (std::exception_ptr) noexcept;
+	 * @endcode
+	 *
+	 * @note
+	 * Both callbacks will be passed to http_server_t::open_async method.
+	 * It means that @a on_error callback will be called for errors detected
+	 * by open_async() methods.
+	 *
+	 * @attention
+	 * Both callbacks should be noexcept functions/functors.
+	 *
+	 * Usage example:
+	 * @code
+	 * using my_http_server = restinio::http_server_t<some_traits>;
+	 *
+	 * my_http_server server{...};
+	 * restinio::on_pool_runner_t<my_http_server> runner{16, server};
+	 *
+	 * std::promise<void> run_promise;
+	 * auto run_future = run_promise.get_future();
+	 * runner.start(
+	 * 	// Ok callback.
+	 * 	[&run_promise]() noexcept {
+	 * 		run_promise.set_value();
+	 * 	},
+	 * 	// Error callback.
+	 * 	[&run_promise](std::exception_ptr ex) noexcept {
+	 * 		run_promise.set_exception(std::move(ex));
+	 * 	});
+	 * // Wait while HTTP-server started (or start failed).
+	 * run_future.get();
+	 * @endcode
+	 *
+	 * @since v.0.6.7
+	 */
+	template<
+		typename On_Ok_Callback,
+		typename On_Error_Callback >
 	void
-	start()
+	start(
+		//! A callback to be called if HTTP-server started successfully.
+		On_Ok_Callback && on_ok,
+		//! A callback to be called if HTTP-server is not started by
+		//! some reasons. Please note that this callback is passed
+		//! to http_server_t::open_async() and will be called only
+		//! for errors detected by open_async() methods.
+		//! If some error is detected outside of open_async() (for
+		//! example a failure to start a thread pool) then on_error
+		//! callback won't be called.
+		On_Error_Callback && on_error )
 	{
+		static_assert( noexcept(on_ok()), "On_Ok_Callback should be noexcept" );
+		static_assert( noexcept(on_error(std::declval<std::exception_ptr>())),
+				"On_Error_Callback should be noexcept" );
+
 		m_server.open_async(
-			[]{ /* Ok. */},
-			[this]( std::exception_ptr /*ex*/ ){
+			[callback = std::move(on_ok)]{ callback(); },
+			[this, callback = std::move(on_error)]( std::exception_ptr ex ){
 				// There is no sense to run pool.
 				m_pool.stop();
 
-				//FIXME: the exception should be stored to be handled
-				//later in wait() method.
-				//NOTE: this fix is planned for v.0.7.0.
-				//std::rethrow_exception( ex );
+				callback( std::move(ex) );
 			} );
 
 		m_pool.start();
 	}
 
+	//! Start the server.
+	/*!
+	 * It just a shorthand for a version of `start` method with callbacks
+	 * where all callbacks to nothing.
+	 */
+	void
+	start()
+	{
+		this->start(
+				[]() noexcept { /* nothing to do */ },
+				[]( std::exception_ptr ) noexcept { /* nothing to do */ } );
+	}
 
 	//! Is server started.
 	bool
 	started() const noexcept { return m_pool.started(); }
 
+	//FIXME: there should be a version of stop() with callbacks like
+	//for start() method above.
 	//! Stop the server.
+	/*!
+	 * @note
+	 * This method is noexcept since v.0.6.7
+	 */
 	void
-	stop()
+	stop() noexcept
 	{
 		m_server.close_async(
 			[this]{
@@ -820,9 +894,236 @@ public :
 	// wait(Exception_Handler && on_exception);
 	//
 	//! Wait for full stop of the server.
+	/*!
+	 * @note
+	 * This method is noexcept since v.0.6.7
+	 */
 	void
-	wait() { m_pool.wait(); }
+	wait() noexcept { m_pool.wait(); }
 };
+
+// Forward declaration.
+// It's necessary for running_server_handle_t.
+template< typename Http_Server >
+class running_server_instance_t;
+
+//
+// running_server_handle_t
+//
+/*!
+ * @brief The type to be used as a handle for running server instance.
+ *
+ * The handle should be seen as a Moveable and not Copyable type.
+ *
+ * @since v.0.6.7
+ */
+template< typename Traits >
+using running_server_handle_t =
+		std::unique_ptr< running_server_instance_t< http_server_t<Traits> > >;
+
+//
+// running_server_instance_t
+//
+/*!
+ * @brief A helper class used in an implementation of #run_async function.
+ *
+ * An instance of that class holds an HTTP-server and thread pool on that
+ * this HTTP-server is launched.
+ *
+ * The HTTP-server will automatically be stopped in the destructor.
+ * However, a user can stop the HTTP-server manually by using
+ * stop() and wait() methods.
+ *
+ * @since v.0.6.7
+ */
+template< typename Http_Server >
+class running_server_instance_t
+{
+	template< typename Traits >
+	friend running_server_handle_t<Traits>
+	run_async(
+			io_context_holder_t,
+			server_settings_t<Traits> &&,
+			std::size_t thread_pool_size );
+
+	//! Actual server instance.
+	Http_Server m_server;
+
+	//! The runner of the server.
+	on_pool_runner_t< Http_Server > m_runner;
+
+	//! Initializing constructor.
+	running_server_instance_t(
+		io_context_holder_t io_context,
+		server_settings_t< typename Http_Server::traits_t > && settings,
+		std::size_t thread_pool_size )
+		:	m_server{ std::move(io_context), std::move(settings) }
+		,	m_runner{ thread_pool_size, m_server }
+	{}
+
+
+	//! Start the HTTP-server.
+	/*!
+	 * Returns when HTTP-server started or some startup failure detected.
+	 * It means that the caller thread will be blocked until HTTP-server
+	 * calls on_ok or on_error callback.
+	 *
+	 * Throws an exception on an error.
+	 */
+	void
+	start()
+	{
+		std::promise<void> p;
+		auto f = p.get_future();
+		m_runner.start(
+				[&p]() noexcept { p.set_value(); },
+				[&p]( std::exception_ptr ex ) noexcept {
+					p.set_exception( std::move(ex) );
+				} );
+		f.get();
+	}
+
+public :
+	/*!
+	 * Stop the HTTP-server.
+	 *
+	 * This method initiates shutdown procedure that can take some
+	 * time. But stop() returns without the waiting for the completeness
+	 * of the shutdown. To wait for the completeness use wait() method:
+	 *
+	 * @code
+	 * auto server = restinio::run_async(...);
+	 * ...
+	 * server->stop(); // Returns without the waiting.
+	 * ... // Some other actions.
+	 * server->wait(); // Returns only when HTTP-server stopped.
+	 * @endcode
+	 *
+	 * @attention
+	 * The current version doesn't guarantee that stop() can be called
+	 * safely several times. Please take care of that and call stop()
+	 * only once.
+	 */
+	void
+	stop() noexcept
+	{
+		m_runner.stop();
+	}
+
+	/*!
+	 * @brief Wait for the shutdown of HTTP-server.
+	 *
+	 * @note
+	 * Method stop() should be called before the call to wait():
+	 * @code
+	 * auto server = restinio::run_async(...);
+	 * ...
+	 * server->stop(); // Initiates the shutdown and returns without the waiting.
+	 * server->wait(); // Returns only when HTTP-server stopped.
+	 * @endcode
+	 *
+	 * @attention
+	 * The current version doesn't guarantee that wait() can be called
+	 * safely several times. Please take care of that and call wait()
+	 * only once.
+	 */
+	void
+	wait() noexcept
+	{
+		m_runner.wait();
+	}
+};
+
+//
+// run_async
+//
+/*!
+ * @brief Creates an instance of HTTP-server and launches it on a
+ * separate thread or thread pool.
+ *
+ * Usage example:
+ * @code
+ * int main() {
+ * 	auto server = restinio::run_async(
+ * 		// Asio's io_context to be used.
+ * 		// HTTP-server will use own Asio's io_context object.
+ * 		restinio::own_io_context(),
+ * 		// The settings for the HTTP-server.
+ * 		restinio::server_settings_t{}
+ * 			.address("127.0.0.1")
+ * 			.port(8080)
+ * 			.request_handler(...),
+ * 		// The size of thread-pool for the HTTP-server.
+ * 		16);
+ * 	// If we are here and run_async doesn't throw then HTTP-server
+ * 	// is started.
+ *
+ * 	... // Some other actions.
+ *
+ * 	// No need to stop HTTP-server manually. It will be automatically
+ * 	// stopped in the destructor of `server` object.
+ * }
+ * @endcode
+ * Or, if user-defined traits should be used:
+ * @code
+ * int main() {
+ * 	struct my_traits : public restinio::default_traits_t {
+ * 		...
+ * 	};
+ *
+ * 	auto server = restinio::run_async<my_traits>(
+ * 		restinio::own_io_context(),
+ * 		restinio::server_settings_t<my_traits>{}
+ * 			.address(...)
+ * 			.port(...)
+ * 			.request_handler(...),
+ * 		// Use just one thread for the HTTP-server.
+ * 		1u);
+ *
+ * 	... // Some other actions.
+ * }
+ * @endcode
+ *
+ * run_async() returns control when HTTP-server is started or some
+ * startup failure is detected. But if a failure is detected then an
+ * exception is thrown. So if run_async() returns successfuly then
+ * HTTP-server is working.
+ *
+ * The started HTTP-server will be automatically stopped at the
+ * destruction of the returned value. Because of that the returned
+ * value should be stored for the time while HTTP-server is needed.
+ *
+ * The started HTTP-server can be stopped manually by calling
+ * stop() and wait() methods:
+ * @code
+ * auto server = restinio::run_async(...);
+ * ...
+ * server->stop(); // Returns without the waiting.
+ * ... // Some other actions.
+ * server->wait(); // Returns only when HTTP-server stopped.
+ * @endcode
+ *
+ * @since v.0.6.7
+ */
+template< typename Traits = default_traits_t >
+RESTINIO_NODISCARD
+running_server_handle_t< Traits >
+run_async(
+	io_context_holder_t io_context,
+	server_settings_t< Traits > && settings,
+	std::size_t thread_pool_size )
+{
+	running_server_handle_t< Traits > handle{
+			new running_server_instance_t< http_server_t<Traits> >{
+					std::move(io_context),
+					std::move(settings),
+					thread_pool_size }
+	};
+
+	handle->start();
+	
+	return handle;
+}
 
 } /* namespace restinio */
 

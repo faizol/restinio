@@ -10,6 +10,7 @@ MxxRu::Cpp::composite_target {
 	required_prj( "test/metaprogramming/prj.ut.rb" )
 	required_prj( "test/tuple_algorithms/prj.ut.rb" )
 	required_prj( "test/http_field_parser/prj.ut.rb" )
+	required_prj( "test/try_parse_field/prj.ut.rb" )
 	required_prj( "test/multipart_body/prj.ut.rb" )
 
 	required_prj( "test/header/prj.ut.rb" )
@@ -71,5 +72,11 @@ MxxRu::Cpp::composite_target {
 	# ================================================================
 	# File upload support.
 	required_prj( "test/file_upload/prj.ut.rb" )
+
+	# ================================================================
+	# Basic Authentification support.
+	required_prj( "test/basic_auth/prj.ut.rb" )
+	# Bearer Authentification support
+	required_prj( "test/bearer_auth/prj.ut.rb" )
 }
 

@@ -9,13 +9,13 @@
 #pragma once
 
 #include <restinio/exception.hpp>
+#include <restinio/expected.hpp>
 
 #include <restinio/utils/impl/bitops.hpp>
 
 #include <restinio/impl/include_fmtlib.hpp>
 
 #include <string>
-#include <bitset>
 #include <array>
 #include <exception>
 #include <iostream> // std::cout, debug
@@ -33,33 +33,77 @@ namespace base64
 
 using uint_type_t = std::uint_fast32_t;
 
-using bitset24_t = std::bitset<24>;
-
 inline bool
-is_base64_char( char c )
+is_base64_char( char c ) noexcept
 {
 	return 1 == is_base64_char_lut< unsigned char >()[
 			static_cast<unsigned char>(c) ];
 }
 
-inline void
-check_string_is_base64( string_view_t str )
+inline bool
+is_valid_base64_string( string_view_t str ) noexcept
 {
-	auto throw_invalid_string = [&]{
-			throw exception_t{
-				fmt::format( "invalid base64 string '{}'", str ) };
-		};
+	enum class expected_type { b64ch, b64ch_or_padding, padding };
 
-	// TODO: Handle long strings.
+	if( str.size() < 4u )
+		return false;
 
-	if( str.size() < 4 )
-		throw_invalid_string();
-
-	for( const auto & ch : str )
+	expected_type expects = expected_type::b64ch;
+	std::uint_fast8_t b64chars_found = 0u; // Can't be greater than 2.
+	std::uint_fast8_t paddings_found = 0u; // Can't be greater than 3.
+	for( const auto ch : str )
 	{
-		if( !is_base64_char( ch ) && ch != '=' )
-			throw_invalid_string();
+		switch( expects )
+		{
+			case expected_type::b64ch:
+			{
+				// Because '=' is a part of base64_chars, it should be checked
+				// individually.
+				if( '=' == ch )
+					return false;
+				else if( is_base64_char( ch ) )
+				{
+					++b64chars_found;
+					if( b64chars_found >= 2u )
+						expects = expected_type::b64ch_or_padding;
+				}
+				else
+					return false;
+				break;
+			}
+			case expected_type::b64ch_or_padding:
+			{
+				if( '=' == ch )
+				{
+					expects = expected_type::padding;
+					++paddings_found;
+				}
+				else if( is_base64_char( ch ) )
+				{
+					/* Nothing to do */
+				}
+				else
+					return false;
+
+				break;
+			}
+			case expected_type::padding:
+			{
+				if( '=' == ch )
+				{
+					++paddings_found;
+					if( paddings_found > 2u )
+						return false;
+				}
+				else
+					return false;
+
+				break;
+			}
+		}
 	}
+
+	return true;
 }
 
 inline uint_type_t
@@ -106,38 +150,45 @@ encode( string_view_t str )
 
 	if( remaining )
 	{
-		uint_type_t bs =
-				1u == remaining ?
-				 	// only one char left.
-				 	(at(i) << 16) :
-					// two chars left.
-					((at(i) << 16) | (at(i+1) << 8));
+		// Some code duplication to avoid additional IFs.
+		if( 1u == remaining )
+		{
+			uint_type_t bs = (at(i) << 16);
+			result.push_back( alphabet_char( sixbits_char<18>(bs) ) );
+			result.push_back( alphabet_char( sixbits_char<12>(bs) ) );
 
-		result.push_back( alphabet_char( sixbits_char<18>(bs) ) );
-		result.push_back( alphabet_char( sixbits_char<12>(bs) ) );
+			result.push_back('=');
+		}
+		else
+		{
+			uint_type_t bs = (at(i) << 16) | (at(i+1) << 8);
 
-		if( (bs >> 8) & 0xFFu )
+			result.push_back( alphabet_char( sixbits_char<18>(bs) ) );
+			result.push_back( alphabet_char( sixbits_char<12>(bs) ) );
 			result.push_back( alphabet_char( sixbits_char<6>(bs) ) );
-		else
-			result.push_back('=');
+		}
 
-		if( bs & 0xFFu )
-			result.push_back( alphabet_char( sixbits_char<0>(bs) ) );
-		else
-			result.push_back('=');
+		result.push_back('=');
 	}
 
 	return result;
 }
 
-inline std::string
-decode( string_view_t str )
+//! Description of base64 decode error.
+enum class decoding_error_t
 {
+	invalid_base64_sequence
+};
+
+inline expected_t< std::string, decoding_error_t >
+try_decode( string_view_t str )
+{
+	if( !is_valid_base64_string( str ) )
+		return make_unexpected( decoding_error_t::invalid_base64_sequence );
+
 	constexpr std::size_t group_size = 4;
 
 	std::string result;
-
-	check_string_is_base64( str );
 	result.reserve( (str.size() / group_size) * 3 );
 
 	const unsigned char * const decode_table = base64_decode_lut< unsigned char >();
@@ -150,28 +201,78 @@ decode( string_view_t str )
 	{
 
 		uint_type_t bs{};
+		int paddings_found = 0u;
 
 		bs |= decode_table[ at(i) ];
+
 		bs <<= 6;
 		bs |= decode_table[ at(i+1) ];
-		bs <<= 6;
-		bs |= str[i+2] != '=' ? decode_table[ at(i+2) ] : 0;
-		bs <<= 6;
-		bs |= str[i+3] != '=' ? decode_table[ at(i+3) ] : 0;
 
+		bs <<= 6;
+		if( '=' == str[i+2] )
+		{
+			++paddings_found;
+		}
+		else
+		{
+			bs |= decode_table[ at(i+2) ];
+		}
+
+		bs <<= 6;
+		if( '=' == str[i+3] )
+		{
+			++paddings_found;
+		}
+		else
+		{
+			bs |= decode_table[ at(i+3) ];
+		}
 
 		using ::restinio::utils::impl::bitops::n_bits_from;
 
 		result.push_back( n_bits_from< char, 16 >(bs) );
-		const auto c2 = n_bits_from< char, 8 >(bs);
-		if( c2 )
-			result.push_back( c2 );
-		const auto c3 = n_bits_from< char, 0 >(bs);
-		if( c3 )
-			result.push_back( c3 );
+		if( paddings_found < 2 )
+		{
+			result.push_back( n_bits_from< char, 8 >(bs) );
+		}
+		if( paddings_found < 1 )
+		{
+			result.push_back( n_bits_from< char, 0 >(bs) );
+		}
 	}
 
 	return result;
+}
+
+namespace impl
+{
+
+void
+throw_exception_on_invalid_base64_string( string_view_t str )
+{
+	constexpr size_t max_allowed_len = 32u;
+	// If str is too long only a part of it will be included
+	// in the error message.
+	if( str.size() > max_allowed_len )
+		throw exception_t{
+				fmt::format( "invalid base64 string that starts with '{}'",
+						str.substr( 0u, max_allowed_len ) )
+		};
+	else
+		throw exception_t{
+			fmt::format( "invalid base64 string '{}'", str ) };
+}
+
+} /* namespace impl */
+
+inline std::string
+decode( string_view_t str )
+{
+	auto result = try_decode( str );
+	if( !result )
+		impl::throw_exception_on_invalid_base64_string( str );
+
+	return std::move( *result );
 }
 
 } /* namespace base64 */
@@ -179,3 +280,4 @@ decode( string_view_t str )
 } /* namespace utils */
 
 } /* namespace restinio */
+
