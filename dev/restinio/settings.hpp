@@ -8,15 +8,19 @@
 
 #pragma once
 
-#include <chrono>
-#include <tuple>
-#include <utility>
-
 #include <restinio/asio_include.hpp>
 
 #include <restinio/exception.hpp>
 #include <restinio/request_handler.hpp>
 #include <restinio/traits.hpp>
+
+#include <restinio/incoming_http_msg_limits.hpp>
+
+#include <restinio/variant.hpp>
+
+#include <chrono>
+#include <tuple>
+#include <utility>
 
 namespace restinio
 {
@@ -419,6 +423,114 @@ struct ip_blocker_holder_t< ip_blocker::noop_ip_blocker_t >
 };
 
 //
+// acceptor_post_bind_hook_t
+//
+/*!
+ * @brief A type of callback to be called after a successful invocation
+ * of bind() function for the acceptor.
+ *
+ * @since v.0.6.11
+ */
+using acceptor_post_bind_hook_t = std::function<
+		void(asio_ns::ip::tcp::acceptor &) >;
+
+namespace details
+{
+
+//
+// no_address_specified_t
+//
+/*!
+ * @brief A special indicator for the case when IP address for a server
+ * is not set explicitly.
+ *
+ * @since v.0.6.11
+ */
+struct no_address_specified_t {};
+
+//
+// address_variant_t
+//
+/*!
+ * @brief A type of variant for holding IP address for a server in
+ * various representations.
+ *
+ * @since v.0.6.11
+ */
+using address_variant_t = variant_t<
+		no_address_specified_t,
+		std::string,
+		asio_ns::ip::address >;
+
+//
+// max_parallel_connections_holder_t
+//
+/*!
+ * @brief A special type for holding the value of maximum allowed
+ * count of parallel connections.
+ *
+ * This type is intended to be used as a mixin for
+ * server_settings_t type.
+ *
+ * Holds the value and provides the actual implementations for
+ * getter and setter of that value.
+ *
+ * @since v.0.6.12
+ */
+template< typename Count_Limiter >
+struct max_parallel_connections_holder_t
+{
+	static constexpr bool has_actual_max_parallel_connections = true;
+
+	/*!
+	 * @brief Actual value of the limit.
+	 *
+	 * By the default the count of parallel connection is not limited.
+	 */
+	std::size_t m_max_parallel_connections{
+			std::numeric_limits<std::size_t>::max()
+		};
+
+	std::size_t
+	max_parallel_connections() const noexcept
+	{
+		return m_max_parallel_connections;
+	}
+
+	void
+	set_max_parallel_connections( std::size_t v ) noexcept
+	{
+		m_max_parallel_connections = v;
+	}
+};
+
+/*!
+ * @brief A specialization of max_parallel_connections_holder for the case
+ * when connection count isn't limited.
+ *
+ * Doesn't hold anything. Hasn't a setter.
+ *
+ * The getter returns a value that means that there is no connection
+ * count limit at all.
+ *
+ * @since v.0.6.12
+ */
+template<>
+struct max_parallel_connections_holder_t<
+		::restinio::connection_count_limits::noop_connection_count_limiter_t >
+{
+	static constexpr bool has_actual_max_parallel_connections = false;
+
+	std::size_t
+	max_parallel_connections() const noexcept
+	{
+		return std::numeric_limits<std::size_t>::max();
+	}
+};
+
+} /* namespace details */
+
+//
 // basic_server_settings_t
 //
 
@@ -439,9 +551,15 @@ class basic_server_settings_t
 	,	protected connection_state_listener_holder_t<
 			typename Traits::connection_state_listener_t >
 	,	protected ip_blocker_holder_t< typename Traits::ip_blocker_t >
+	,	protected details::max_parallel_connections_holder_t<
+			typename connection_count_limit_types<Traits>::limiter_t >
 {
 		using base_type_t = socket_type_dependent_settings_t<
 				Derived, typename Traits::stream_socket_t>;
+
+		using max_parallel_connections_holder_base_t =
+				details::max_parallel_connections_holder_t<
+						typename connection_count_limit_types<Traits>::limiter_t >;
 
 		using connection_state_listener_holder_t<
 						typename Traits::connection_state_listener_t
@@ -450,6 +568,8 @@ class basic_server_settings_t
 		using ip_blocker_holder_t<
 						typename Traits::ip_blocker_t
 					>::has_actual_ip_blocker;
+
+		using max_parallel_connections_holder_base_t::has_actual_max_parallel_connections;
 
 	public:
 		basic_server_settings_t(
@@ -475,6 +595,7 @@ class basic_server_settings_t
 			return std::move( this->port( p ) );
 		}
 
+		RESTINIO_NODISCARD
 		std::uint16_t
 		port() const
 		{
@@ -494,12 +615,30 @@ class basic_server_settings_t
 			return std::move( this->protocol( p ) );
 		}
 
+		RESTINIO_NODISCARD
 		asio_ns::ip::tcp
 		protocol() const
 		{
 			return m_protocol;
 		}
 
+		/*!
+		 * Sets the IP address for a server in textual form.
+		 *
+		 * Usage example:
+		 * @code
+		 * using my_server_t = restinio::http_server_t< my_server_traits_t >;
+		 * my_server_t server{
+		 * 	restinio::own_io_context(),
+		 * 	[](auto & settings) {
+		 * 		settings.port(8080);
+		 * 		settings.address("192.168.1.1");
+		 * 		settings.request_handler(...);
+		 * 		...
+		 * 	}
+		 * };
+		 * @endcode
+		 */
 		Derived &
 		address( std::string addr ) &
 		{
@@ -507,13 +646,74 @@ class basic_server_settings_t
 			return reference_to_derived();
 		}
 
+		/*!
+		 * Sets the IP address for a server in textual form.
+		 *
+		 * Usage example:
+		 * @code
+		 * restinio::run(
+		 * 	restinio::on_this_thread()
+		 * 		.port(...)
+		 * 		.address("192.168.1.1")
+		 * 		.request_handler(...)
+		 * 	);
+		 * @endcode
+		 */
 		Derived &&
 		address( std::string addr ) &&
 		{
 			return std::move( this->address( std::move( addr ) ) );
 		}
 
-		const std::string &
+		/*!
+		 * Sets the IP address for a server in binary form.
+		 *
+		 * Usage example:
+		 * @code
+		 * auto actual_ip = asio::ip::address::from_string(app.config().ip_addr());
+		 * ...
+		 * using my_server_t = restinio::http_server_t< my_server_traits_t >;
+		 * my_server_t server{
+		 * 	restinio::own_io_context(),
+		 * 	[actual_ip](auto & settings) {
+		 * 		settings.port(8080);
+		 * 		settings.address(actual_ip);
+		 * 		settings.request_handler(...);
+		 * 		...
+		 * 	}
+		 * };
+		 * @endcode
+		 */
+		Derived &
+		address( asio_ns::ip::address addr ) &
+		{
+			m_address = addr;
+			return reference_to_derived();
+		}
+
+		/*!
+		 * Sets the IP address for a server in binary form.
+		 *
+		 * Usage example:
+		 * @code
+		 * auto actual_ip = asio::ip::address::from_string(app.config().ip_addr());
+		 * ...
+		 * restinio::run(
+		 * 	restinio::on_this_thread()
+		 * 		.port(...)
+		 * 		.address(actual_ip)
+		 * 		.request_handler(...)
+		 * 	);
+		 * @endcode
+		 */
+		Derived &&
+		address( asio_ns::ip::address addr ) &&
+		{
+			return std::move( this->address( addr ) );
+		}
+
+		RESTINIO_NODISCARD
+		const details::address_variant_t &
 		address() const
 		{
 			return m_address;
@@ -642,7 +842,7 @@ class basic_server_settings_t
 
 		//! Request handler.
 		//! \{
-		using request_handler_t = typename Traits::request_handler_t;
+		using request_handler_t = request_handler_type_from_traits_t< Traits >;
 
 		Derived &
 		request_handler( std::unique_ptr< request_handler_t > handler ) &
@@ -836,20 +1036,20 @@ class basic_server_settings_t
 		*/
 		//! \{
 		Derived &
-		separate_accept_and_create_connect( bool do_separate ) &
+		separate_accept_and_create_connect( bool do_separate ) & noexcept
 		{
 			m_separate_accept_and_create_connect = do_separate;
 			return reference_to_derived();
 		}
 
 		Derived &&
-		separate_accept_and_create_connect( bool do_separate ) &&
+		separate_accept_and_create_connect( bool do_separate ) && noexcept
 		{
 			return std::move( this->separate_accept_and_create_connect( do_separate ) );
 		}
 
 		bool
-		separate_accept_and_create_connect() const
+		separate_accept_and_create_connect() const noexcept
 		{
 			return m_separate_accept_and_create_connect;
 		}
@@ -872,6 +1072,13 @@ class basic_server_settings_t
 			return std::move(this->cleanup_func( std::forward<Func>(func) ));
 		}
 
+		/*!
+		 * @note
+		 * This method is intended to be used by RESTinio and it can be
+		 * changed or removed in future versions of RESTinio without any
+		 * notice.
+		 */
+		RESTINIO_NODISCARD
 		cleanup_functor_t
 		giveaway_cleanup_func()
 		{
@@ -1111,6 +1318,339 @@ class basic_server_settings_t
 			this->check_valid_ip_blocker_pointer();
 		}
 
+		// Acceptor post-bind hook.
+		/*!
+		 * @brief A setter for post-bind callback.
+		 *
+		 * Usage example:
+		 * @code
+		 * using my_server_t = restinio::http_server_t< my_server_traits_t >;
+		 * my_server_t server{
+		 * 	restinio::own_io_context(),
+		 * 	[](auto & settings) {
+		 * 		settings.port(...);
+		 * 		settings.address(...);
+		 * 		settings.acceptor_post_bind_hook(
+		 * 			[](asio::ip::tcp::acceptor & acceptor) {
+		 * 				...
+		 * 			})
+		 * 		settings.request_handler(...);
+		 * 		...
+		 * 	}
+		 * };
+		 * @endcode
+		 *
+		 * @since v.0.6.11
+		 */
+		Derived &
+		acceptor_post_bind_hook( acceptor_post_bind_hook_t hook ) &
+		{
+			if( !hook )
+				throw exception_t{ "acceptor_post_bind_hook cannot be empty" };
+
+			m_acceptor_post_bind_hook = std::move(hook);
+			return reference_to_derived();
+		}
+
+		/*!
+		 * @brief A setter for post-bind callback.
+		 *
+		 * Usage example:
+		 * @code
+		 * restinio::run(
+		 * 	restinio::on_this_thread()
+		 * 		.port(...)
+		 * 		.address(...)
+		 * 		.acceptor_post_bind_hook(
+		 * 			[](asio::ip::tcp::acceptor & acceptor) {
+		 * 				...
+		 * 			})
+		 * 		.request_handler(...)
+		 * 	);
+		 * @endcode
+		 *
+		 * @since v.0.6.11
+		 */
+		Derived &&
+		acceptor_post_bind_hook( acceptor_post_bind_hook_t hook ) &&
+		{
+			return std::move(this->acceptor_post_bind_hook( std::move(hook) ));
+		}
+
+		/*!
+		 * @brief A getter for post-bind callback.
+		 *
+		 * @note
+		 * This method is intended to be used by RESTinio and it can be
+		 * changed or removed in future versions of RESTinio without any
+		 * notice.
+		 *
+		 * @since v.0.6.11
+		 */
+		RESTINIO_NODISCARD
+		acceptor_post_bind_hook_t
+		giveaway_acceptor_post_bind_hook()
+		{
+			return std::move(m_acceptor_post_bind_hook);
+		}
+
+		/*!
+		 * @brief Getter of optional limits for incoming HTTP messages.
+		 *
+		 * In v.0.6.12 if the limits for incoming HTTP messages are not
+		 * set explicitely then a defaultly constructed instance of
+		 * incoming_http_msg_limits_t is used. This means the absence of
+		 * any limits.
+		 *
+		 * But if the limits were set by using appropriate setters then
+		 * a reference to an instance with user-defined limits is returned.
+		 *
+		 * @since v.0.6.12
+		 */
+		RESTINIO_NODISCARD
+		const incoming_http_msg_limits_t &
+		incoming_http_msg_limits() const noexcept
+		{
+			return m_incoming_http_msg_limits;
+		}
+
+		/*!
+		 * @brief Setter of optional limits for incoming HTTP messages.
+		 *
+		 * Usage example:
+		 * @code
+		 * struct my_traits : public restinio::default_traits_t { ... };
+		 * restinio::server_settings_t<my_traits> settings;
+		 * settings.incoming_http_msg_limits(
+		 * 	restinio::incoming_http_msg_limits_t{}
+		 * 		.max_url_size(8000u)
+		 * 		.max_field_name_size(2048u)
+		 * 		.max_field_value_size(4096u)
+		 * );
+		 * ...
+		 * auto server = restinio::run_async(
+		 * 	restinio::own_io_context(),
+		 * 	std::move(settings),
+		 * 	std::thread::hardware_concurrency());
+		 * @endcode
+		 *
+		 * @since v.0.6.12
+		 */
+		Derived &
+		incoming_http_msg_limits(
+			const incoming_http_msg_limits_t & limits ) & noexcept
+		{
+			m_incoming_http_msg_limits = limits;
+			return reference_to_derived();
+		}
+
+		/*!
+		 * @brief Setter of optional limits for incoming HTTP messages.
+		 *
+		 * Usage example:
+		 * @code
+		 * struct my_traits : public restinio::default_traits_t { ... };
+		 * ...
+		 * auto server = restinio::run_async(
+		 * 	restinio::own_io_context(),
+		 * 	restinio::server_settings_t<my_traits>{}
+		 * 		...
+		 * 		.incoming_http_msg_limits(
+		 * 			restinio::incoming_http_msg_limits_t{}
+		 * 				.max_url_size(8000u)
+		 * 				.max_field_name_size(2048u)
+		 * 				.max_field_value_size(4096u)
+		 * 		),
+		 * 	std::thread::hardware_concurrency());
+		 * @endcode
+		 *
+		 * @since v.0.6.12
+		 */
+		Derived &&
+		incoming_http_msg_limits(
+			const incoming_http_msg_limits_t & limits ) && noexcept
+		{
+			return std::move(this->incoming_http_msg_limits(limits));
+		}
+
+		/*!
+		 * @brief Setter for connection count limit.
+		 *
+		 * @note
+		 * This setter can be called only if the usage of connection
+		 * count limit is turned on explicitly.
+		 *
+		 * Usage example:
+		 * @code
+		 * struct my_traits : public restinio::default_traits_t {
+		 * 	static constexpr bool use_connection_count_limiter = true;
+		 * };
+		 * ...
+		 * restinio::server_settings_t<my_traits> settings;
+		 * settings.max_parallel_connections( 1000u );
+		 * ...
+		 * auto server = restinio::run_async(
+		 * 	restinio::own_io_context(),
+		 * 	std::move(settings),
+		 * 	std::thread::hardware_concurrency());
+		 * @endcode
+		 *
+		 * @since v.0.6.12
+		 */
+		Derived &
+		max_parallel_connections( std::size_t value ) & noexcept
+		{
+			static_assert(
+					basic_server_settings_t::has_actual_max_parallel_connections,
+					"max_parallel_connections(value) can't be used "
+					"for the noop_connection_count_limiter_t" );
+
+			this->set_max_parallel_connections( value );
+			return reference_to_derived();
+		}
+
+		/*!
+		 * @brief Setter for connection count limit.
+		 *
+		 * @note
+		 * This setter can be called only if the usage of connection
+		 * count limit is turned on explicitly.
+		 *
+		 * Usage example:
+		 * @code
+		 * struct my_traits : public restinio::default_traits_t {
+		 * 	static constexpr bool use_connection_count_limiter = true;
+		 * };
+		 * ...
+		 * auto server = restinio::run_async(
+		 * 	restinio::own_io_context(),
+		 * 	restinio::server_settings_t<my_traits>{}
+		 * 		...
+		 * 		.max_parallel_connections(1000u),
+		 * 	std::thread::hardware_concurrency());
+		 * @endcode
+		 *
+		 * @since v.0.6.12
+		 */
+		Derived &&
+		max_parallel_connections( std::size_t value ) && noexcept 
+		{
+			return std::move(this->max_parallel_connections( value ));
+		}
+
+		using max_parallel_connections_holder_base_t::max_parallel_connections;
+
+		/*!
+		 * @name User-data factory.
+		 * @{
+		 */
+		/*!
+		 * @brief The actual type of extra-data-factory.
+		 * @since v.0.6.13
+		 */
+		using extra_data_factory_t = typename Traits::extra_data_factory_t;
+		/*!
+		 * @brief Type of shared-pointer to extra-data-factory.
+		 * @since v.0.6.13
+		 */
+		using extra_data_factory_handle_t = std::shared_ptr< extra_data_factory_t >;
+
+		/*!
+		 * @brief Setter for extra-data-factory.
+		 *
+		 * Usage example:
+		 * @code
+		 * class my_extra_data_factory {
+		 * 	... // Some factory's data.
+		 * public:
+		 * 	struct data_t {...};
+		 *
+		 * 	my_extra_data_factory(...) {...}
+		 *
+		 * 	void make_within(restinio::extra_data_buffer_t<data_t> buf) {
+		 * 		new(buf.get()) data_t{...};
+		 * 	}
+		 * };
+		 *
+		 * struct my_traits : public restinio::default_traits_t {
+		 * 	using extra_data_factory_t = my_extra_data_factory;
+		 * };
+		 *
+		 * restinio::server_settings_t<my_traits> settings;
+		 * ...
+		 * settings.extra_data_factory(std::make_shared<my_extra_data_factory>(...));
+		 * ...
+		 * auto server = restinio::run_async(
+		 * 	restinio::own_io_context(),
+		 * 	std::move(settings),
+		 * 	std::thread::hardware_concurrency());
+		 * @endcode
+		 *
+		 * @since v.0.6.13
+		 */
+		Derived &
+		extra_data_factory(
+			extra_data_factory_handle_t factory ) &
+		{
+			this->m_extra_data_factory = std::move(factory);
+			return reference_to_derived();
+		}
+
+		/*!
+		 * @brief Setter for extra-data-factory.
+		 *
+		 * Usage example:
+		 * @code
+		 * class my_extra_data_factory {
+		 * 	... // Some factory's data.
+		 * public:
+		 * 	struct data_t {...};
+		 *
+		 * 	my_extra_data_factory(...) {...}
+		 *
+		 * 	void make_within(restinio::extra_data_buffer_t<data_t> buf) {
+		 * 		new(buf.get()) data_t{...};
+		 * 	}
+		 * };
+		 *
+		 * struct my_traits : public restinio::default_traits_t {
+		 * 	using extra_data_factory_t = my_extra_data_factory;
+		 * };
+		 *
+		 * auto server = restinio::run_async(
+		 * 	restinio::own_io_context(),
+		 * 	restinio::server_settings_t<my_traits>{}
+		 * 		.extra_data_factory(std::make_shared<my_extra_data_factory>(...))
+		 * 		...
+		 * 		,
+		 * 	std::thread::hardware_concurrency());
+		 * @endcode
+		 *
+		 * @since v.0.6.13
+		 */
+		Derived &&
+		extra_data_factory(
+			extra_data_factory_handle_t factory ) &&
+		{
+			return std::move(this->extra_data_factory( std::move(factory) ));
+		}
+
+		/*!
+		 * @brief Extractor for extra-data-factory.
+		 * @since v.0.6.13
+		 */
+		RESTINIO_NODISCARD
+		extra_data_factory_handle_t
+		giveaway_extra_data_factory() const noexcept
+		{
+			return ensure_created(
+					std::move(this->m_extra_data_factory),
+					"extra_data_factory is not set" );
+		}
+		/*!
+		 * @}
+		 */
+
 	private:
 		Derived &
 		reference_to_derived()
@@ -1144,7 +1684,11 @@ class basic_server_settings_t
 		//! \{
 		std::uint16_t m_port;
 		asio_ns::ip::tcp m_protocol;
-		std::string m_address;
+		/*!
+		 * @note
+		 * This member has type address_variant_t since v.0.6.11
+		 */
+		details::address_variant_t m_address;
 		//! \}
 
 		//! Size of buffer for io operations.
@@ -1177,6 +1721,16 @@ class basic_server_settings_t
 		//! Acceptor options setter.
 		std::unique_ptr< acceptor_options_setter_t > m_acceptor_options_setter;
 
+		//! A hook to be called just after a successful call to bind for acceptor.
+		/*!
+		 * An empty lambda is used by default.
+		 *
+		 * @since v.0.6.11
+		 */
+		acceptor_post_bind_hook_t m_acceptor_post_bind_hook{
+				[](asio_ns::ip::tcp::acceptor &) {}
+			};
+
 		//! Socket options setter.
 		std::unique_ptr< socket_options_setter_t > m_socket_options_setter;
 
@@ -1187,6 +1741,20 @@ class basic_server_settings_t
 
 		//! Optional cleanup functor.
 		cleanup_functor_t m_cleanup_functor;
+
+		/*!
+		 * @brief Limits for incoming HTTP messages.
+		 *
+		 * @since v.0.6.12
+		 */
+		incoming_http_msg_limits_t m_incoming_http_msg_limits;
+
+		/*!
+		 * @brief User-data-factory for server.
+		 *
+		 * @since v.0.6.13
+		 */
+		extra_data_factory_handle_t m_extra_data_factory;
 };
 
 //

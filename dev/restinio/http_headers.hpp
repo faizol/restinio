@@ -710,6 +710,28 @@ class http_header_fields_t
 		//! Type of const_iterator for enumeration of fields.
 		using const_iterator = fields_container_t::const_iterator;
 
+		//! The result of handling yet another field value.
+		/*!
+		 * A value of that enumeration should be returned by a lambda-function
+		 * passed to for_each_value_of() method.
+		 *
+		 * @since v.0.6.9
+		 */
+		enum class handling_result_t
+		{
+			//! Next value of field should be found and passed to the next
+			//! invocation of handler.
+			continue_enumeration,
+			//! The loop on field values should be stopped.
+			stop_enumeration
+		};
+
+		constexpr static handling_result_t continue_enumeration() noexcept
+		{ return handling_result_t::continue_enumeration; }
+
+		constexpr static handling_result_t stop_enumeration() noexcept
+		{ return handling_result_t::stop_enumeration; }
+
 		http_header_fields_t()
 		{
 			m_fields.reserve( RESTINIO_HEADER_FIELDS_DEFAULT_RESERVE_COUNT );
@@ -820,6 +842,65 @@ class http_header_fields_t
 						std::move( field_value ) );
 				}
 			}
+		}
+
+		/*!
+		 * @brief Add a field in the form of id-value pair.
+		 *
+		 * If `field_id=http_field_t::field_unspecified` then function
+		 * does nothing.
+		 *
+		 * @note
+		 * This method doesn't check the presence of the field.
+		 * So it can be used for storing of several values of HTTP-field.
+		 *
+		 * @since v.0.6.9
+		 */
+		void
+		add_field(
+			http_field_t field_id,
+			std::string field_value )
+		{
+			if( http_field_t::field_unspecified != field_id )
+			{
+				m_fields.emplace_back(
+					field_id,
+					std::move( field_value ) );
+			}
+		}
+
+		/*!
+		 * @brief Add a field in the form of name-value pair.
+		 *
+		 * @note
+		 * This method doesn't check the presence of the field.
+		 * So it can be used for storing of several values of HTTP-field.
+		 *
+		 * @since v.0.6.9
+		 */
+		void
+		add_field(
+			std::string field_name,
+			std::string field_value )
+		{
+			m_fields.emplace_back(
+				std::move( field_name ),
+				std::move( field_value ) );
+		}
+
+		/*!
+		 * @brief Add a field in the form of http_header_field object.
+		 *
+		 * @note
+		 * This method doesn't check the presence of the field.
+		 * So it can be used for storing of several values of HTTP-field.
+		 *
+		 * @since v.0.6.9
+		 */
+		void
+		add_field( http_header_field_t http_header_field )
+		{
+			m_fields.push_back( std::move(http_header_field) );
 		}
 
 		//! Append field with name.
@@ -1080,20 +1161,41 @@ class http_header_fields_t
 		}
 
 		//! Remove field by name.
-		void
-		remove_field( string_view_t field_name )
+		/*!
+		 * If there are several occurences of @a field_name only the first
+		 * one will be removed.
+		 *
+		 * @note
+		 * Since v.0.6.9 returns `true` if an occurence of a field
+		 * with name @a field_name has been removed. The value `false`
+		 * returned if there is no field with name @a field_name.
+		 */
+		bool
+		remove_field( string_view_t field_name ) noexcept
 		{
 			const auto it = find( field_name );
 
 			if( m_fields.end() != it )
 			{
 				m_fields.erase( it );
+				return true;
 			}
+
+			return false;
 		}
 
 		//! Remove field by id.
-		void
-		remove_field( http_field_t field_id )
+		/*!
+		 * If there are several occurences of @a field_id only the first
+		 * one will be removed.
+		 *
+		 * @note
+		 * Since v.0.6.9 returns `true` if an occurence of a field
+		 * with id @a field_id has been removed. The value `false`
+		 * returned if there is no field with id @a field_id.
+		 */
+		bool
+		remove_field( http_field_t field_id ) noexcept
 		{
 			if( http_field_t::field_unspecified != field_id )
 			{
@@ -1102,8 +1204,62 @@ class http_header_fields_t
 				if( m_fields.end() != it )
 				{
 					m_fields.erase( it );
+					return true;
 				}
 			}
+
+			return false;
+		}
+
+		//! Remove all occurences of a field with specified name.
+		/*!
+		 * @return the count of removed occurences.
+		 *
+		 * @since v.0.6.9
+		 */
+		std::size_t
+		remove_all_of( string_view_t field_name ) noexcept
+		{
+			std::size_t count{};
+			for( auto it = m_fields.begin(); it != m_fields.end(); )
+			{
+				if( impl::is_equal_caseless( it->name(), field_name ) )
+				{
+					it = m_fields.erase( it );
+					++count;
+				}
+				else
+					++it;
+			}
+
+			return count;
+		}
+
+		//! Remove all occurences of a field with specified id.
+		/*!
+		 * @return the count of removed occurences.
+		 *
+		 * @since v.0.6.9
+		 */
+		std::size_t
+		remove_all_of( http_field_t field_id ) noexcept
+		{
+			std::size_t count{};
+			if( http_field_t::field_unspecified != field_id )
+			{
+				for( auto it = m_fields.begin(); it != m_fields.end(); )
+				{
+					if( it->field_id() == field_id )
+					{
+						it = m_fields.erase( it );
+						++count;
+					}
+					else
+						++it;
+				}
+			}
+
+			return count;
 		}
 
 		/*!
@@ -1208,6 +1364,118 @@ class http_header_fields_t
 		{
 			for( const auto & f : m_fields )
 				lambda( f );
+		}
+
+		//! Enumeration of each value of a field.
+		/*!
+		 * Calls @a lambda for each value of a field @a field_id.
+		 *
+		 * Lambda should has one of the following formats:
+		 * @code
+		 * restinio::http_header_fields_t::handling_result_t
+		 * (const restinio::string_view_t &);
+		 *
+		 * restinio::http_header_fields_t::handling_result_t
+		 * (restinio::string_view_t);
+		 * @endcode
+		 *
+		 * @note
+		 * The @a lambda can throw.
+		 *
+		 * @attention
+		 * The content of this http_header_fields_t shouldn't be changed
+		 * during the enumeration (it means that fields can't be removed and
+		 * new fields can't be added).
+		 *
+		 * Usage example:
+		 * @code
+		 * headers().for_each_value_of(restinio::http_field_t::transfer_encoding,
+		 * 		[](auto value) {
+		 * 			std::cout << "encoding: " << value << std::endl;
+		 * 			return restinio::http_header_fields_t::continue_enumeration();
+		 * 		} );
+		 * @endcode
+		 */
+		template< typename Lambda >
+		void
+		for_each_value_of(
+			http_field_t field_id,
+			Lambda && lambda ) const
+				noexcept(noexcept(lambda(
+						std::declval<const string_view_t &>())))
+		{
+			static_assert(
+				std::is_same<
+					handling_result_t,
+					decltype(lambda(std::declval<const string_view_t &>()))
+				>::value,
+				"lambda should return restinio::http_header_fields_t::handling_result_t" );
+
+			for( const auto & f : m_fields )
+			{
+				if( field_id == f.field_id() )
+				{
+					const handling_result_t r = lambda( f.value() );
+					if( stop_enumeration() == r )
+						break;
+				}
+			}
+		}
+
+		//! Enumeration of each value of a field.
+		/*!
+		 * Calls @a lambda for each value of a field @a field_name.
+		 *
+		 * Lambda should has one of the following formats:
+		 * @code
+		 * restinio::http_header_fields_t::handling_result_t
+		 * (const restinio::string_view_t &);
+		 *
+		 * restinio::http_header_fields_t::handling_result_t
+		 * (restinio::string_view_t);
+		 * @endcode
+		 *
+		 * @note
+		 * The @a lambda can throw.
+		 *
+		 * @attention
+		 * The content of this http_header_fields_t shouldn't be changed
+		 * during the enumeration (it means that fields can't be removed and
+		 * new fields can't be added).
+		 *
+		 * Usage example:
+		 * @code
+		 * headers().for_each_value_of("Transfer-Encoding",
+		 * 		[](auto value) {
+		 * 			std::cout << "encoding: " << value << std::endl;
+		 * 			return restinio::http_header_fields_t::continue_enumeration();
+		 * 		} );
+		 * @endcode
+		 */
+		template< typename Lambda >
+		void
+		for_each_value_of(
+			string_view_t field_name,
+			Lambda && lambda ) const
+				noexcept(noexcept(lambda(
+						std::declval<const string_view_t &>())))
+		{
+			static_assert(
+				std::is_same<
+					handling_result_t,
+					decltype(lambda(std::declval<const string_view_t &>()))
+				>::value,
+				"lambda should return restinio::http_header_fields_t::handling_result_t" );
+
+			for( const auto & f : m_fields )
+			{
+				if( impl::is_equal_caseless( f.name(), field_name ) )
+				{
+					const handling_result_t r = lambda( f.value() );
+					if( stop_enumeration() == r )
+						break;
+				}
+			}
 		}
 
 		const_iterator

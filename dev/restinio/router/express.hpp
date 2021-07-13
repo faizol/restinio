@@ -417,35 +417,79 @@ class route_matcher_t
 } /* namespace impl */
 
 //
+// generic_express_request_handler_t
+//
+/*!
+ * @brief Type of generic handler for one route.
+ *
+ * Since v.0.6.13 some extra-data can be incorporated into request-object.
+ * In that case request-handler will have a different format in
+ * comparison with previous versions. The type generic_express_request_handler_t
+ * describes a request-handler when extra-data of type @a Extra_Data is
+ * bound to request object.
+ *
+ * @note
+ * If the default extra-data-factory in specified in server's traits
+ * then the old type express_request_handler_t can be used for
+ * the simplicity.
+ *
+ * @since v.0.6.13
+ */
+template< typename Extra_Data >
+using generic_express_request_handler_t = std::function<
+		request_handling_status_t(
+				generic_request_handle_t<Extra_Data>,
+				route_params_t )
+	>;
+
+//
 // express_request_handler_t
 //
-
+/*!
+ * @brief Type of a handler for one route in the case when there is
+ * no extra-data in request object.
+ *
+ * Since v.0.6.13 it's just an alias for generic_express_request_handler_t
+ * for the case when the default extra-data-factory is used in
+ * server's traits.
+ */
 using express_request_handler_t =
-		std::function< request_handling_status_t( request_handle_t, route_params_t ) >;
+		generic_express_request_handler_t< no_extra_data_factory_t::data_t >;
 
 //
-// express_route_entry_t
+// generic_express_route_entry_t
 //
 
-//! A single express route entry.
+//! A single generic express route entry.
 /*!
 	Might be helpful for use without express_router_t,
 	if only a single route is needed.
 	It gives the same help with route parameters.
 */
-template < typename Regex_Engine = std_regex_engine_t>
-class express_route_entry_t
+template<
+	typename Regex_Engine,
+	typename Extra_Data_Factory >
+class generic_express_route_entry_t
 {
+	public:
+		using actual_request_handler_t = generic_express_request_handler_t<
+				typename Extra_Data_Factory::data_t
+			>;
+		using actual_request_handle_t = generic_request_handle_t<
+				typename Extra_Data_Factory::data_t
+			>;
+
+	private:
 		using matcher_init_data_t =
 			path2regex::impl::route_regex_matcher_data_t<
 					impl::route_params_appender_t,
 					Regex_Engine >;
 
 		template< typename Method_Matcher >
-		express_route_entry_t(
+		generic_express_route_entry_t(
 			Method_Matcher && method_matcher,
 			matcher_init_data_t matcher_data,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 			:	m_matcher{
 					std::forward<Method_Matcher>( method_matcher ),
 					std::move( matcher_data.m_regex ),
@@ -455,21 +499,25 @@ class express_route_entry_t
 		{}
 
 	public:
-		express_route_entry_t( const express_route_entry_t & ) = delete;
-		express_route_entry_t & operator = ( const express_route_entry_t & ) = delete;
+		generic_express_route_entry_t(
+				const generic_express_route_entry_t & ) = delete;
+		generic_express_route_entry_t & operator=(
+				const generic_express_route_entry_t & ) = delete;
 
-		express_route_entry_t() = default;
-		express_route_entry_t( express_route_entry_t && ) = default;
-		express_route_entry_t &
-		operator = ( express_route_entry_t && ) = default;
+		generic_express_route_entry_t() = default;
+		generic_express_route_entry_t(
+				generic_express_route_entry_t && ) = default;
+
+		generic_express_route_entry_t &
+		operator=( generic_express_route_entry_t && ) = default;
 
 		template< typename Method_Matcher >
-		express_route_entry_t(
+		generic_express_route_entry_t(
 			Method_Matcher && method_matcher,
 			string_view_t route_path,
 			const path2regex::options_t & options,
-			express_request_handler_t handler )
-			:	express_route_entry_t{
+			actual_request_handler_t handler )
+			:	generic_express_route_entry_t{
 					std::forward<Method_Matcher>( method_matcher ),
 					path2regex::path2regex< impl::route_params_appender_t, Regex_Engine >(
 						route_path,
@@ -478,11 +526,11 @@ class express_route_entry_t
 		{}
 
 		template< typename Method_Matcher >
-		express_route_entry_t(
+		generic_express_route_entry_t(
 			Method_Matcher && method_matcher,
 			string_view_t route_path,
-			express_request_handler_t handler )
-			:	express_route_entry_t{
+			actual_request_handler_t handler )
+			:	generic_express_route_entry_t{
 					std::forward<Method_Matcher>( method_matcher ),
 					route_path,
 					path2regex::options_t{},
@@ -504,45 +552,83 @@ class express_route_entry_t
 		//! Calls a handler of given request with given params.
 		RESTINIO_NODISCARD
 		request_handling_status_t
-		handle( request_handle_t rh, route_params_t rp ) const
+		handle( actual_request_handle_t rh, route_params_t rp ) const
 		{
 			return m_handler( std::move( rh ), std::move( rp ) );
 		}
 
 	private:
 		impl::route_matcher_t< Regex_Engine > m_matcher;
-		express_request_handler_t m_handler;
+		actual_request_handler_t m_handler;
 };
 
 //
-// express_router_t
+// express_route_entry_t
+//
+/*!
+ * @brief An alias for a single route entry in the case when the default
+ * extra-data-factory is used in server's traits.
+ *
+ * Since v.0.6.13 this name is just an alias for generic_express_route_entry_t.
+ */
+template<
+	typename Regex_Engine = std_regex_engine_t >
+using express_route_entry_t = generic_express_route_entry_t<
+		Regex_Engine,
+		no_extra_data_factory_t >;
+
+//
+// generic_express_router_t
 //
 
-//! Express.js style router.
-/*
+//! Generic Express.js style router.
+/*!
 	Express routers acts as a request handler (it means it is a function-object
-	that can be called as a restinio request handler).
-	It aggregates several endpoint-handlers and picks one or none of them to handle the request.
-	The choice of the handler to execute depends on request target and HTTP method.
-	If router finds no handler matching the request then request is considered unmatched.
-	It is possible to set a handler for unmatched requests, otherwise router rejects the request and
-	RESTinio takes care of it.
+	that can be called as a restinio request handler).  It aggregates several
+	endpoint-handlers and picks one or none of them to handle the request.  The
+	choice of the handler to execute depends on request target and HTTP method.
 
-	There is a difference between ordinary restinio request handler
-	and the one that is used with experss router: express_request_handler_t.
-	The signature of a handlers that can be put in router
-	has an additional parameter -- a container with parameters extracted from URI (request target).
+	If router finds no handler matching the request then request is considered
+	unmatched.
+
+	It is possible to set a handler for unmatched requests, otherwise router
+	rejects the request and RESTinio takes care of it.
+
+	There is a difference between ordinary restinio request handler and the one
+	that is used with experss router: generic_express_request_handler_t.  The
+	signature of a handlers that can be put in router has an additional
+	parameter -- a container with parameters extracted from URI (request
+	target).
+
+	@tparam Regex_Engine Type of regex-engine to be used.
+
+	@tparam Extra_Data_Factory Type of extra-data-factory specified in
+	server's traits.
 */
-template < typename Regex_Engine = std_regex_engine_t>
-class express_router_t
+template<
+	typename Regex_Engine,
+	typename Extra_Data_Factory >
+class generic_express_router_t
 {
 	public:
-		express_router_t() = default;
-		express_router_t( express_router_t && ) = default;
+		using actual_request_handle_t =
+				generic_request_handle_t< typename Extra_Data_Factory::data_t >;
+		using actual_request_handler_t =
+				typename generic_express_route_entry_t<
+						Regex_Engine,
+						Extra_Data_Factory
+					>::actual_request_handler_t;
+		using non_matched_handler_t =
+				generic_non_matched_request_handler_t<
+						typename Extra_Data_Factory::data_t
+				>;
+
+		generic_express_router_t() = default;
+		generic_express_router_t( generic_express_router_t && ) = default;
 
 		RESTINIO_NODISCARD
 		request_handling_status_t
-		operator () ( request_handle_t req ) const
+		operator()( actual_request_handle_t req ) const
 		{
 			impl::target_path_holder_t target_path{ req->header().path() };
 			route_params_t params;
@@ -563,7 +649,7 @@ class express_router_t
 				return m_non_matched_request_handler( std::move( req ) );
 			}
 
-			return request_rejected();
+			return request_not_handled();
 		}
 
 		//! Add handlers.
@@ -573,7 +659,7 @@ class express_router_t
 		add_handler(
 			Method_Matcher && method_matcher,
 			string_view_t route_path,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				std::forward<Method_Matcher>(method_matcher),
@@ -588,7 +674,7 @@ class express_router_t
 			Method_Matcher && method_matcher,
 			string_view_t route_path,
 			const path2regex::options_t & options,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			m_handlers.emplace_back(
 					std::forward<Method_Matcher>(method_matcher),
@@ -600,7 +686,7 @@ class express_router_t
 		void
 		http_delete(
 			string_view_t route_path,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_delete(),
@@ -612,7 +698,7 @@ class express_router_t
 		http_delete(
 			string_view_t route_path,
 			const path2regex::options_t & options,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_delete(),
@@ -624,7 +710,7 @@ class express_router_t
 		void
 		http_get(
 			string_view_t route_path,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_get(),
@@ -636,7 +722,7 @@ class express_router_t
 		http_get(
 			string_view_t route_path,
 			const path2regex::options_t & options,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_get(),
@@ -648,7 +734,7 @@ class express_router_t
 		void
 		http_head(
 			string_view_t route_path,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_head(),
@@ -660,7 +746,7 @@ class express_router_t
 		http_head(
 			string_view_t route_path,
 			const path2regex::options_t & options,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_head(),
@@ -672,7 +758,7 @@ class express_router_t
 		void
 		http_post(
 			string_view_t route_path,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_post(),
@@ -684,7 +770,7 @@ class express_router_t
 		http_post(
 			string_view_t route_path,
 			const path2regex::options_t & options,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_post(),
@@ -696,7 +782,7 @@ class express_router_t
 		void
 		http_put(
 			string_view_t route_path,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_put(),
@@ -708,7 +794,7 @@ class express_router_t
 		http_put(
 			string_view_t route_path,
 			const path2regex::options_t & options,
-			express_request_handler_t handler )
+			actual_request_handler_t handler )
 		{
 			add_handler(
 				http_method_put(),
@@ -720,20 +806,41 @@ class express_router_t
 
 		//! Set handler for requests that don't match any route.
 		void
-		non_matched_request_handler( non_matched_request_handler_t nmrh )
+		non_matched_request_handler( non_matched_handler_t nmrh )
 		{
-			m_non_matched_request_handler= std::move( nmrh );
+			m_non_matched_request_handler = std::move( nmrh );
 		}
 
 	private:
-		using route_entry_t = express_route_entry_t< Regex_Engine >;
+		using route_entry_t = generic_express_route_entry_t<
+				Regex_Engine,
+				Extra_Data_Factory
+		>;
 
 		//! A list of existing routes.
 		std::vector< route_entry_t > m_handlers;
 
 		//! Handler that is called for requests that don't match any route.
-		non_matched_request_handler_t m_non_matched_request_handler;
+		non_matched_handler_t m_non_matched_request_handler;
 };
+
+//
+// express_router_t
+//
+/*!
+ * @brief A type of express-like router for the case when the default
+ * extra-data-factory is specified in the server's traits.
+ *
+ * Since v.0.6.13 this type is just an alias for generic_express_router_t
+ * with the default extra-data-factory type.
+ *
+ * @tparam Regex_Engine Type of regex-engine to be used.
+ */
+template<
+	typename Regex_Engine = std_regex_engine_t >
+using express_router_t = generic_express_router_t<
+		Regex_Engine,
+		no_extra_data_factory_t >;
 
 } /* namespace router */
 

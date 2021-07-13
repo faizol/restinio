@@ -228,7 +228,7 @@ struct field_value_producer_t
 		// CR or LF symbol should be returned back.
 		from.putback();
 
-		return std::move(accumulator);
+		return { std::move(accumulator) };
 	}
 };
 
@@ -272,7 +272,7 @@ make_parser()
 						symbol(CR), symbol(LF)
 					) >> custom_consumer(
 							[](auto & to, http_header_field_t && v) {
-								to.set_field( std::move(v) );
+								to.add_field( std::move(v) );
 							} )
 				)
 			) >> &parsed_part_t::fields,
@@ -491,10 +491,11 @@ check_boundary_value( string_view_t value )
  *
  * @since v.0.6.1
  */
+template< typename Extra_Data >
 RESTINIO_NODISCARD
-inline expected_t< std::string, enumeration_error_t >
+expected_t< std::string, enumeration_error_t >
 detect_boundary_for_multipart_body(
-	const request_t & req,
+	const generic_request_t< Extra_Data > & req,
 	string_view_t expected_media_type,
 	optional_t< string_view_t > expected_media_subtype )
 {
@@ -548,7 +549,7 @@ detect_boundary_for_multipart_body(
 	actual_boundary_mark.append( "--" );
 	actual_boundary_mark.append( boundary->data(), boundary->size() );
 
-	return std::move(actual_boundary_mark);
+	return { std::move(actual_boundary_mark) };
 }
 
 namespace impl
@@ -679,12 +680,12 @@ struct valid_handler_type<
  *
  * @since v.0.6.1
  */
-template< typename Handler >
+template< typename User_Type, typename Handler >
 RESTINIO_NODISCARD
 expected_t< std::size_t, enumeration_error_t >
 enumerate_parts(
 	//! The request to be handled.
-	const request_t & req,
+	const generic_request_t< User_Type > & req,
 	//! The handler to be called for every parsed part.
 	Handler && handler,
 	//! The expected value of 'type' part of 'media-type' from Content-Type.

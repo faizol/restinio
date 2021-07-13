@@ -427,6 +427,45 @@ struct is_ctext_predicate_t
 };
 
 //
+// is_token_char_predicate_t
+//
+/*!
+ * @brief A predicate for symbol_producer_template that checks that
+ * a symbol can be used inside a token.
+ */
+struct is_token_char_predicate_t
+{
+	RESTINIO_NODISCARD
+	static constexpr bool
+	is_token_char( const char ch ) noexcept
+	{
+		return is_alpha(ch) || is_digit(ch) ||
+				ch == '!' ||
+				ch == '#' ||
+				ch == '$' ||
+				ch == '%' ||
+				ch == '&' ||
+				ch == '\'' ||
+				ch == '*' ||
+				ch == '+' ||
+				ch == '-' ||
+				ch == '.' ||
+				ch == '^' ||
+				ch == '_' ||
+				ch == '`' ||
+				ch == '|' ||
+				ch == '~';
+	}
+
+	RESTINIO_NODISCARD
+	bool
+	operator()( const char actual ) const noexcept
+	{
+		return is_token_char(actual);
+	}
+};
+
+//
 // ows_producer_t
 //
 /*!
@@ -520,22 +559,7 @@ class token_producer_t : public producer_tag< std::string >
 	static constexpr bool
 	is_token_char( const char ch ) noexcept
 	{
-		return is_alpha(ch) || is_digit(ch) ||
-				ch == '!' ||
-				ch == '#' ||
-				ch == '$' ||
-				ch == '%' ||
-				ch == '&' ||
-				ch == '\'' ||
-				ch == '*' ||
-				ch == '+' ||
-				ch == '-' ||
-				ch == '.' ||
-				ch == '^' ||
-				ch == '_' ||
-				ch == '`' ||
-				ch == '|' ||
-				ch == '~';
+		return is_token_char_predicate_t::is_token_char( ch );
 	}
 
 public :
@@ -546,7 +570,7 @@ public :
 		std::string value;
 		const auto try_result = try_parse_value( from, value );
 		if( !try_result )
-			return std::move(value);
+			return { std::move(value) };
 		else
 			return make_unexpected( *try_result );
 	}
@@ -640,7 +664,7 @@ public :
 				if( !try_result )
 				{
 					consumer.commit();
-					return std::move(value);
+					return { std::move(value) };
 				}
 				else
 					return make_unexpected( *try_result );
@@ -915,6 +939,28 @@ inline auto
 ows() noexcept { return ows_p() >> skip(); }
 
 //
+// token_symbol_producer
+//
+/*!
+ * @brief A factory for producer of symbols than can be used in tokens.
+ *
+ * Usage example:
+ * @code
+	produce<std::string>(
+		repeat(1, 20, token_symbol_p() >> to_container());
+ * @endcode
+ *
+ * @since v.0.6.9
+ */
+RESTINIO_NODISCARD
+inline auto
+token_symbol_p() noexcept
+{
+	return restinio::easy_parser::impl::symbol_producer_template_t<
+			impl::is_token_char_predicate_t >{};
+}
+
+//
 // token_producer
 //
 /*!
@@ -992,6 +1038,82 @@ inline auto
 quoted_pair_p() noexcept
 {
 	return impl::quoted_pair_producer_t{};
+}
+
+//
+// expected_token_p
+//
+/*!
+ * @brief A factory function to create a producer that expect a
+ * token with specific value.
+ *
+ * If the expected token is successfully parsed then boolean value
+ * is produced.
+ *
+ * Usage example:
+ * @code
+ * enum class compression { zlib, bz2, xz };
+ * produce<compression>(
+ * 	expected_token_p("compression") >> skip(),
+ * 	ows(),
+ * 	symbol('='),
+ * 	ows(),
+ * 	alternatives(
+ * 		expected_token_p("zlib") >> just_result(compression::zlib),
+ * 		expected_token_p("bz2") >> just_result(compression::bz2),
+ * 		expected_token_p("xz") >> just_result(compression::xz)
+ * 	)
+ * );
+ * @endcode
+ *
+ * @since v.0.6.9
+ */
+RESTINIO_NODISCARD
+inline auto
+expected_token_p( string_view_t token )
+{
+	return produce< bool >(
+			exact_p( token ) >> as_result(),
+			not_clause( token_symbol_p() >> skip() ) );
+}
+
+//
+// expected_caseless_token_p
+//
+/*!
+ * @brief A factory function to create a producer that expect a
+ * token with specific value.
+ *
+ * This processer uses case-insensitive comparison.
+ *
+ * If the expected token is successfully parsed then boolean value
+ * is produced.
+ *
+ * Usage example:
+ * @code
+ * enum class compression { zlib, bz2, xz };
+ * produce<compression>(
+ * 	caseless_expected_token_p("Compression") >> skip(),
+ * 	ows(),
+ * 	symbol('='),
+ * 	ows(),
+ * 	alternatives(
+ * 		caseless_expected_token_p("ZLib") >> just_result(compression::zlib),
+ * 		caseless_expected_token_p("BZ2") >> just_result(compression::bz2),
+ * 		caseless_expected_token_p("xz") >> just_result(compression::xz)
+ * 	)
+ * );
+ * @endcode
+ *
+ * @since v.0.6.9
+ */
+RESTINIO_NODISCARD
+inline auto
+expected_caseless_token_p( string_view_t token )
+{
+	return produce< bool >(
+			caseless_exact_p( token ) >> as_result(),
+			not_clause( token_symbol_p() >> skip() ) );
 }
 
 namespace impl
@@ -1225,7 +1347,7 @@ public :
 			).try_process( from, tmp_value );
 
 		if( !process_result )
-			return std::move(tmp_value);
+			return { std::move(tmp_value) };
 		else
 			return make_unexpected( *process_result );
 	}
@@ -1288,7 +1410,7 @@ public :
 			).try_process( from, tmp_value );
 
 		if( !process_result )
-			return std::move(tmp_value);
+			return { std::move(tmp_value) };
 		else
 			return make_unexpected( *process_result );
 	}
@@ -1547,8 +1669,8 @@ T := *( OWS ';' OWS token '=' OWS (token / quoted_string))
  * 	parameter_with_mandatory_value_container_t params;
  * };
  * produce<my_field>(
- * 	token_p() >> to_lower() >> &my_field,
- * 	params_with_value_p() >> &my_field
+ * 	token_p() >> to_lower() >> &my_field::value,
+ * 	params_with_value_p() >> &my_field::params
  * );
  * @endcode
  *
@@ -1725,8 +1847,8 @@ T := *( OWS ';' OWS token ['=' OWS (token / quoted_string)] )
  * 	parameter_with_optional_value_container_t params;
  * };
  * produce<my_field>(
- * 	token_p() >> to_lower() >> &my_field,
- * 	params_with_opt_value_p() >> &my_field
+ * 	token_p() >> to_lower() >> &my_field::value,
+ * 	params_with_opt_value_p() >> &my_field::params
  * );
  * @endcode
  *

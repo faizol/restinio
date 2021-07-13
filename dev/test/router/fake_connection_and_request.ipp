@@ -1,33 +1,25 @@
-struct fake_connection_t : public restinio::impl::connection_base_t
+#include "../common/fake_connection.ipp"
+
+template< typename Extra_Data_Factory >
+auto
+create_fake_request(
+	restinio::router::generic_easy_parser_router_t< Extra_Data_Factory > &,
+	std::string target,
+	http_method_id_t method = http_method_get() )
 {
-	fake_connection_t() : restinio::impl::connection_base_t{ 0 }
-	{}
+	using request_t = restinio::generic_request_t<
+			typename Extra_Data_Factory::data_t
+	>;
 
-	virtual void
-	check_timeout( std::shared_ptr< tcp_connection_ctx_base_t > & ) override
-	{}
-
-	virtual void
-	write_response_parts(
-		request_id_t ,
-		response_output_flags_t ,
-		write_group_t ) override
-	{}
-};
-
-
-request_handle_t
-create_fake_request( std::string target, http_method_id_t method = http_method_get() )
-{
-	return
-		std::make_shared< request_t >(
+	Extra_Data_Factory extra_data_factory;
+	return std::make_shared< request_t >(
 			0,
 			http_request_header_t{ method, std::move( target ) },
 			"",
 			std::make_shared< fake_connection_t >(),
 			restinio::endpoint_t{
 				restinio::asio_ns::ip::make_address_v4("127.0.0.1"),
-				3000 } );
-			// restinio::impl::connection_handle_t{ new fake_connection_t} );
+				3000 },
+			extra_data_factory );
 }
 

@@ -369,6 +369,25 @@ struct result_value_wrapper< std::basic_string< Char, Args... > >
 		to.push_back( what );
 	}
 
+	/*!
+	 * @brief Special overload for the case when std::string should
+	 * be added to another std::string.
+	 *
+	 * For example, in cases like:
+	 * @code
+	 * produce< std::string >(
+	 * 	produce< std::string >(...) >> to_container(),
+	 * 	produce< std::string >(...) >> to_container(),
+	 * 	...
+	 * )
+	 * @endcode
+	 */
+	static void
+	to_container( wrapped_type & to, wrapped_type && what )
+	{
+		to.append( what );
+	}
+
 	RESTINIO_NODISCARD
 	static result_type &&
 	unwrap_value( wrapped_type & v )
@@ -1005,6 +1024,146 @@ template< typename T >
 constexpr bool is_transformer_v = is_transformer<T>::value;
 
 //
+// transformer_invoker
+//
+/*!
+ * @brief A helper template for calling transformation function.
+ *
+ * The transformer_invoker class is intended to wrap a call to
+ * @a Transformer::transform method. That method can return
+ * a value of type T or a value of type expected_t<T, error_reason_t>.
+ *
+ * In the case of return value of type T the returned value of T
+ * should be used directly.
+ *
+ * In the case of return value of type expected_t<T, error_reason_t>
+ * the return value should be checked for the presence of an error.
+ * In the case of an error expected_t<T, error_reason_t> should be
+ * converted into expected_t<T, parser_error_t>.
+ *
+ * @since v.0.6.11
+ */
+template< typename Result_Type >
+struct transformer_invoker
+{
+	template< typename Transformer, typename Input_Type >
+	RESTINIO_NODISCARD
+	static Result_Type
+	invoke(
+		source_t &,
+		Transformer & transformer,
+		expected_t< Input_Type, parse_error_t > && input )
+	{
+		return transformer.transform( std::move(*input) );
+	}
+};
+
+/*!
+ * This specialization of transformer_invoker handles a case when
+ * transformation method returns expected_t<T, error_reason_t>.
+ *
+ * @since v.0.6.11
+ */
+template< typename Result_Type >
+struct transformer_invoker< expected_t< Result_Type, error_reason_t > >
+{
+	template< typename Transformer, typename Input_Type >
+	RESTINIO_NODISCARD
+	static expected_t< Result_Type, parse_error_t >
+	invoke(
+		// source_t is necessary to get the position in the case of an error.
+		source_t & source,
+		Transformer & transformer,
+		expected_t< Input_Type, parse_error_t > && input )
+	{
+		auto result = transformer.transform( std::move(*input) );
+		if( result )
+			return *result;
+		else
+			return make_unexpected( parse_error_t{
+					source.current_position(),
+					result.error()
+				} );
+	}
+};
+
+//
+// is_appropriate_transformer_result_type
+//
+/*!
+ * @brief A metafunction that checks is Result_Type can be used as
+ * the result of transformation method.
+ *
+ * A transformation method can return a value of type T or a value
+ * of type expected_t<T, error_reason_t>. But a user can define
+ * transformation method that returns an expected_t<T, parse_error_t>
+ * just by a mistake. That mistake should be detected.
+ *
+ * Metafunction is_appropriate_transformer_result_type serves that
+ * purpose: it defines @a value to `true` if transformation method
+ * returns T or expected_t<T, error_reason_t>. In the case of
+ * expected_t<T, parse_error_t> @a value will be set to `false.
+ *
+ * @since v.0.6.11
+ */
+template< typename Result_Type >
+struct is_appropriate_transformer_result_type
+{
+	static constexpr bool value = true;
+};
+
+template< typename Result_Type >
+struct is_appropriate_transformer_result_type<
+		expected_t< Result_Type, error_reason_t > >
+{
+	static constexpr bool value = true;
+};
+
+template< typename Result_Type >
+struct is_appropriate_transformer_result_type<
+		expected_t< Result_Type, parse_error_t > >
+{
+	static constexpr bool value = false;
+};
+
+//
+// transformed_value_producer_traits_checker
+//
+/*!
+ * @brief A helper template for checking a possibility to connect
+ * a producer with a transformer.
+ *
+ * This helper can be seen as a metafunction that defines a boolean
+ * value is_valid_transformation_result_type. If that value is `true`
+ * then @a Transformer::transform method returns allowed type
+ * (T or expected_t<T, error_reson_t>).
+ *
+ * @since v.0.6.11
+ */
+template< typename Producer, typename Transformer >
+struct transformed_value_producer_traits_checker
+{
+	static_assert( is_producer_v<Producer>,
+			"Producer should be a producer type" );
+	static_assert( is_transformer_v<Transformer>,
+			"Transformer should be a transformer type" );
+
+	using producer_result_t = std::decay_t< decltype( 
+			std::declval<Producer &>().try_parse( std::declval<source_t &>() )
+		) >;
+
+	using transformation_result_t = std::decay_t< decltype(
+			std::declval<Transformer &>().transform(
+					std::move(*(std::declval<producer_result_t>())) )
+		) >;
+
+	using expected_result_t = typename Transformer::result_type;
+
+	static constexpr bool is_valid_transformation_result_type =
+			is_appropriate_transformer_result_type< expected_result_t >::value;
+};
+
+//
 // transformed_value_producer_t
 //
 /*!
@@ -1020,10 +1179,13 @@ template< typename Producer, typename Transformer >
 class transformed_value_producer_t
 	:	public producer_tag< typename Transformer::result_type >
 {
-	static_assert( is_producer_v<Producer>,
-			"Producer should be a producer type" );
-	static_assert( is_transformer_v<Transformer>,
-			"Transformer should be a transformer type" );
+	using traits_checker = transformed_value_producer_traits_checker<
+			Producer, Transformer >;
+
+	static_assert(
+			traits_checker::is_valid_transformation_result_type,
+			"transformation result should be either T or "
+			"expected_t<T, error_reson_t>, not expected_t<T, parse_error_t>" );
 
 	Producer m_producer;
 	Transformer m_transformer;
@@ -1045,7 +1207,13 @@ public :
 		auto producer_result = m_producer.try_parse( source );
 		if( producer_result )
 		{
-			return m_transformer.transform( std::move(*producer_result) );
+			using transformation_result_t =
+					typename traits_checker::transformation_result_t;
+
+			return transformer_invoker< transformation_result_t >::invoke(
+					source,
+					m_transformer,
+					std::move(producer_result) );
 		}
 		else
 			return make_unexpected( producer_result.error() );
@@ -1069,7 +1237,7 @@ operator>>(
 	using transformator_type = transformed_value_producer_t< P, T >;
 
 	return transformator_type{ std::move(producer), std::move(transformer) };
-};
+}
 
 //
 // transformer_proxy_tag
@@ -1147,7 +1315,7 @@ operator>>(
 	using producer_type = transformed_value_producer_t< P, transformator_type >;
 
 	return producer_type{ std::move(producer), std::move(real_transformer) };
-};
+}
 
 //
 // consumer_tag
@@ -1854,7 +2022,7 @@ public :
 	expected_t< Target_Type, parse_error_t >
 	try_parse( source_t & from )
 	{
-		typename value_wrapper_t::wrapped_type tmp_value;
+		typename value_wrapper_t::wrapped_type tmp_value{};
 		optional_t< parse_error_t > error;
 
 		const bool success = restinio::utils::tuple_algorithms::all_of(
@@ -2085,6 +2253,30 @@ struct caseless_particular_symbol_predicate_t
 };
 
 //
+// symbol_from_range_predicate_t
+//
+/*!
+ * @brief A predicate for cases where a symbol should belong
+ * to specified range.
+ *
+ * Range is inclusive. It means that `(ch >= left && ch <= right)`.
+ *
+ * @since v.0.6.9
+ */
+struct symbol_from_range_predicate_t
+{
+	char m_left;
+	char m_right;
+
+	RESTINIO_NODISCARD
+	bool
+	operator()( const char actual ) const noexcept
+	{
+		return ( actual >= m_left && actual <= m_right );
+	}
+};
+
+//
 // symbol_producer_t
 //
 /*!
@@ -2153,6 +2345,29 @@ class caseless_symbol_producer_t
 public:
 	caseless_symbol_producer_t( char expected )
 		:	base_type_t{ caseless_particular_symbol_predicate_t{expected} }
+	{}
+};
+
+//
+// symbol_from_range_producer_t
+//
+/*!
+ * @brief A producer for the case when a symbol should belong
+ * to specified range.
+ *
+ * Range is inclusive. It means that `(ch >= left && ch <= right)`.
+ *
+ * @since v.0.6.9
+ */
+class symbol_from_range_producer_t
+	: public symbol_producer_template_t< symbol_from_range_predicate_t >
+{
+	using base_type_t =
+		symbol_producer_template_t< symbol_from_range_predicate_t >;
+
+public:
+	symbol_from_range_producer_t( char left, char right )
+		:	base_type_t{ symbol_from_range_predicate_t{left, right} }
 	{}
 };
 
@@ -2966,15 +3181,66 @@ public :
 		: m_converter{ std::forward<Convert_Arg>(converter) }
 	{}
 
+	/*!
+	 * @brief Performs the transformation by calling the converter.
+	 *
+	 * @note
+	 * Since v.0.6.11 the result type changed from Output_Type to `auto`.
+	 * That allows to use converters that returns
+	 * expected_t<Output_Type, error_reason_t>.
+	 */
 	template< typename Input >
 	RESTINIO_NODISCARD
-	Output_Type
+	auto
 	transform( Input && input ) const
 		noexcept(noexcept(m_converter(std::forward<Input>(input))))
 	{
+		using actual_result_t = std::decay_t< decltype(
+				m_converter(std::forward<Input>(input))
+			) >;
+
+		static_assert(
+				is_appropriate_transformer_result_type<actual_result_t>::value,
+				"the return value of converter should be either Output_Type or "
+				"expected_t<Output_Type, error_reason_t>" );
+
 		return m_converter(std::forward<Input>(input));
 	}
 };
+
+//
+// conversion_result_type_detector
+//
+/*!
+ * @brief A helper template for the detection of type to be produced
+ * as conversion procedure.
+ *
+ * A conversion procedure can produce either T or expected_t<T, error_reason_t>.
+ * In the case of expected_t<T, error_reason_t> it is necessary to know T.
+ * This helper template allows to detect T in both cases.
+ *
+ * @since v.0.6.11
+ */
+template< typename Result_Type >
+struct conversion_result_type_detector
+{
+	using type = Result_Type;
+};
+
+template< typename Result_Type >
+struct conversion_result_type_detector< expected_t< Result_Type, error_reason_t > >
+{
+	using type = Result_Type;
+};
+
+/*!
+ * A helper for simplification of usage of conversion_result_type_detector<R>.
+ *
+ * @since v.0.6.11
+ */
+template< typename Result_Type >
+using conversion_result_type_detector_t =
+		typename conversion_result_type_detector<Result_Type>::type;
 
 //
 // convert_transformer_proxy_t
@@ -2995,6 +3261,13 @@ public :
 template< typename Converter >
 class convert_transformer_proxy_t : public transformer_proxy_tag
 {
+	template< typename Input_Type >
+	using output = conversion_result_type_detector_t<
+				std::decay_t< decltype(
+						std::declval<Converter &>()(std::declval<Input_Type&&>())
+					) >
+			>;
+
 	Converter m_converter;
 
 public :
@@ -3010,10 +3283,9 @@ public :
 	make_transformer() const &
 		noexcept(noexcept(Converter{m_converter}))
 	{
-		using output_type = std::decay_t<
-				decltype(m_converter(std::declval<Input_Type&&>())) >;
+		using output_t = output<Input_Type>;
 
-		return convert_transformer_t< output_type, Converter >{ m_converter };
+		return convert_transformer_t< output_t, Converter >{ m_converter };
 	}
 
 	template< typename Input_Type >
@@ -3022,10 +3294,9 @@ public :
 	make_transformer() &&
 		noexcept(noexcept(Converter{std::move(m_converter)}))
 	{
-		using output_type = std::decay_t<
-				decltype(m_converter(std::declval<Input_Type&&>())) >;
+		using output_t = output<Input_Type>;
 
-		return convert_transformer_t< output_type, Converter >{
+		return convert_transformer_t< output_t, Converter >{
 				std::move(m_converter)
 		};
 	}
@@ -3132,6 +3403,126 @@ public:
 	try_parse( source_t & from )
 	{
 		return try_parse_exact_fragment( from,
+				m_fragment.begin(), m_fragment.end() );
+	}
+};
+
+//
+// try_parse_caseless_exact_fragment
+//
+
+// Requires that begin is not equal to end.
+// It assumes that content in [begin, end) is already in lower case.
+template< typename It >
+RESTINIO_NODISCARD
+expected_t< bool, parse_error_t >
+try_parse_caseless_exact_fragment( source_t & from, It begin, It end )
+{
+	assert( begin != end );
+
+	source_t::content_consumer_t consumer{ from };
+
+	for( auto ch = from.getch(); !ch.m_eof; ch = from.getch() )
+	{
+		if( restinio::impl::to_lower_case(ch.m_ch) != *begin )
+			return make_unexpected( parse_error_t{
+					consumer.started_at(),
+					error_reason_t::pattern_not_found
+				} );
+		if( ++begin == end )
+			break;
+	}
+
+	if( begin != end )
+		return make_unexpected( parse_error_t{
+				consumer.started_at(),
+				error_reason_t::unexpected_eof
+			} );
+
+	consumer.commit();
+
+	return true;
+}
+
+//
+// caseless_exact_fixed_size_fragment_producer_t
+//
+/*!
+ * @brief A producer that expects a fragment in the input and
+ * produces boolean value if that fragment is found.
+ *
+ * The comparison is performed in case-insensitive manner.
+ *
+ * This class is indended for working with fixed-size string literals
+ * with terminating null-symbol.
+ *
+ * @since v.0.6.9
+ */
+template< std::size_t Size >
+class caseless_exact_fixed_size_fragment_producer_t
+	:	public producer_tag< bool >
+{
+	static_assert( 1u < Size, "Size is expected to greater that 1" );
+
+	// NOTE: there is no space for last zero-byte.
+	std::array< char, Size-1u > m_fragment;
+
+public:
+	caseless_exact_fixed_size_fragment_producer_t( const char (&f)[Size] )
+	{
+		// Content should be converted to lower-case.
+		// NOTE: last zero-byte is discarded.
+		std::transform(
+				&f[ 0 ], &f[ m_fragment.size() ],
+				m_fragment.data(),
+				[]( const char src ) {
+					return restinio::impl::to_lower_case( src );
+				} );
+	}
+
+	RESTINIO_NODISCARD
+	expected_t< bool, parse_error_t >
+	try_parse( source_t & from )
+	{
+		return try_parse_caseless_exact_fragment( from,
+				m_fragment.begin(), m_fragment.end() );
+	}
+};
+
+//
+// caseless_exact_fragment_producer_t
+//
+/*!
+ * @brief A producer that expects a fragment in the input and
+ * produces boolean value if that fragment is found.
+ *
+ * The comparison is performed in case-insensitive manner.
+ *
+ * @since v.0.6.9
+ */
+class caseless_exact_fragment_producer_t
+	:	public producer_tag< bool >
+{
+	std::string m_fragment;
+
+public:
+	caseless_exact_fragment_producer_t( std::string fragment )
+		:	m_fragment{ std::move(fragment) }
+	{
+		if( m_fragment.empty() )
+			throw exception_t( "'fragment' value for exact_fragment_producer_t "
+					"can't be empty!" );
+
+		// Content should be converted to lower-case.
+		for( auto & ch : m_fragment )
+			ch = restinio::impl::to_lower_case( ch );
+	}
+
+	RESTINIO_NODISCARD
+	expected_t< bool, parse_error_t >
+	try_parse( source_t & from )
+	{
+		return try_parse_caseless_exact_fragment( from,
 				m_fragment.begin(), m_fragment.end() );
 	}
 };
@@ -3605,6 +3996,24 @@ caseless_symbol_p( char expected ) noexcept
 }
 
 //
+// symbol_from_range_p
+//
+/*!
+ * @brief A factory function to create a symbol_from_range_producer.
+ *
+ * @return a producer that expects a symbol from `[left, right]` range in the
+ * input stream and returns it if that character is found.
+ * 
+ * @since v.0.6.9
+ */
+RESTINIO_NODISCARD
+inline auto
+symbol_from_range_p( char left, char right ) noexcept
+{
+	return impl::symbol_from_range_producer_t{left, right};
+}
+
+//
 // symbol
 //
 /*!
@@ -3646,6 +4055,27 @@ inline auto
 caseless_symbol( char expected ) noexcept
 {
 	return caseless_symbol_p(expected) >> skip();
+}
+
+//
+// symbol_from_range
+//
+/*!
+ * @brief A factory function to create a clause that expects a symbol
+ * from specified range, extracts it and then skips it.
+ *
+ * The call to `symbol_from_range('a', 'z')` function is an equivalent of:
+ * @code
+ * symbol_from_range_p('a', 'z') >> skip()
+ * @endcode
+ * 
+ * @since v.0.6.9
+ */
+RESTINIO_NODISCARD
+inline auto
+symbol_from_range( char left, char right ) noexcept
+{
+	return symbol_from_range_p(left, right) >> skip();
 }
 
 //
@@ -3931,8 +4361,8 @@ hexadecimal_number_p( digits_to_consume_t digits_limit ) noexcept
  *
  * Parses numbers in the form:
 @verbatim
-number = [sign] DIGIT+
-sign = '-' | '+'
+number := [sign] DIGIT+
+sign   := '-' | '+'
 @endverbatim
  *
  * @note
@@ -3970,8 +4400,8 @@ decimal_number_p() noexcept
  *
  * Parses numbers in the form:
 @verbatim
-number = [sign] DIGIT+
-sign = '-' | '+'
+number := [sign] DIGIT+
+sign   := '-' | '+'
 @endverbatim
  *
  * @note
@@ -4245,11 +4675,13 @@ just_result( T value )
  *
  * Usage example:
  * @code
+ * // Parser for:
+ * // size       := DIGIT+ [multiplier]
+ * // multiplier := ('b'|'B') | ('k'|'K') | ('m'|'M')
  * struct tmp_size { std::uint32_t c_{1u}; std::uint32_t m_{1u}; };
  * auto size_producer = produce<std::uint64_t>(
  * 	produce<tmp_size>(
- * 		non_negative_decimal_number_p<std::uint32_t>()
- * 				>> &tmp_size::c_,
+ * 		non_negative_decimal_number_p<std::uint32_t>() >> &tmp_size::c_,
  * 		maybe(
  * 			produce<std::uint32_t>(
  * 				alternatives(
@@ -4259,11 +4691,42 @@ just_result( T value )
  * 				)
  * 			) >> &tmp_size::m_
  * 		)
- * 	) >> convert( [](const tmp_size & ts) {
- * 				return std::uint64_t{ts.c_} * ts.m_;
- * 			} )
- * 		>> as_result()
+ * 	)
+ * 	>> convert( [](const tmp_size & ts) { return std::uint64_t{ts.c_} * ts.m_; } )
+ * 	>> as_result()
  * );
+ * @endcode
+ *
+ * @note
+ * Since v.0.6.11 a conversion function can have two formats. The first one is:
+ * @code
+ * result_type fn(input_type source_val);
+ * @endcode
+ * for example:
+ * @code
+ * convert([](const std::string & from) -> int {...})
+ * @endcode
+ * in that case a conversion error can only be reported via an exception.
+ * The second one is:
+ * @code
+ * expected_t<result_type, error_reason_t> fn(input_type source_val);
+ * @endcode
+ * for example:
+ * @code
+ * convert([](const std::string & from) -> expected_t<int, error_reason_t> {...})
+ * @endcode
+ * in that case a converion error can be reported also via returning value.
+ * For example, let's assume that in the code snippet shown above the result
+ * value should be greater than 0. It can be checked in the conversion
+ * function that way:
+ * @code
+ * convert([](const tmp_size & ts) -> expected_t<std::uint64_t, error_reason_t> {
+ * 	const auto r = std::uint64_t{ts.c_} * ts.m_;
+ * 	if( r )
+ * 		return r;
+ * 	else
+ * 		return make_unexpected(error_reason_t::illegal_value_found);
+ * }
  * @endcode
  *
  * @since v.0.6.6
@@ -4408,6 +4871,135 @@ auto
 exact( const char (&fragment)[Size] )
 {
 	return impl::exact_fixed_size_fragment_producer_t<Size>{ fragment } >> skip();
+}
+
+//
+// caseless_exact_p
+//
+/*!
+ * @brief A factory function that creates an instance of
+ * caseless_exact_fragment_producer.
+ *
+ * Usage example:
+ * @code
+ * produce<std::string>(
+ * 	alternatives(
+ * 		caseless_exact_p("pro") >> just_result("Professional"),
+ * 		caseless_exact_p("con") >> just_result("Consumer")
+ * 	)
+ * );
+ * @endcode
+ *
+ * @since v.0.6.9
+ */
+RESTINIO_NODISCARD
+inline auto
+caseless_exact_p( string_view_t fragment )
+{
+	return impl::caseless_exact_fragment_producer_t{
+			std::string{ fragment.data(), fragment.size() }
+		};
+}
+
+/*!
+ * @brief A factory function that creates an instance of
+ * caseless_exact_fragment_producer.
+ *
+ * Usage example:
+ * @code
+ * produce<std::string>(
+ * 	alternatives(
+ * 		caseless_exact_p("pro") >> just_result("Professional"),
+ * 		caseless_exact_p("con") >> just_result("Consumer")
+ * 	)
+ * );
+ * @endcode
+ *
+ * @attention
+ * This version is dedicated to be used with string literals.
+ * Because of that the last byte from a literal will be ignored (it's
+ * assumed that this byte contains zero).
+ * But this behavior would lead to unexpected results in such cases:
+ * @code
+ * const char prefix[]{ 'h', 'e', 'l', 'l', 'o' };
+ *
+ * produce<std::string>(caseless_exact_p(prefix) >> just_result("Hi!"));
+ * @endcode
+ * because the last byte with value 'o' will be ignored by
+ * exact_producer. To avoid such behavior string_view_t should be
+ * used explicitely:
+ * @code
+ * produce<std::string>(caseless_exact_p(string_view_t{prefix})
+ * 		>> just_result("Hi!"));
+ * @endcode
+ *
+ * @since v.0.6.9
+ */
+template< std::size_t Size >
+RESTINIO_NODISCARD
+auto
+caseless_exact_p( const char (&fragment)[Size] )
+{
+	return impl::caseless_exact_fixed_size_fragment_producer_t<Size>{ fragment };
+}
+
+//
+// caseless_exact
+//
+/*!
+ * @brief A factory function that creates an instance of
+ * caseless_exact_fragment clause.
+ *
+ * Usage example:
+ * @code
+ * produce<std::string>(caseless_exact("version="), token() >> as_result());
+ * @endcode
+ *
+ * @since v.0.6.9
+ */
+RESTINIO_NODISCARD
+inline auto
+caseless_exact( string_view_t fragment )
+{
+	return impl::caseless_exact_fragment_producer_t{
+			std::string{ fragment.data(), fragment.size() }
+		} >> skip();
+}
+
+/*!
+ * @brief A factory function that creates an instance of
+ * caseless_exact_fragment clause.
+ *
+ * Usage example:
+ * @code
+ * produce<std::string>(caseless_exact("version="), token() >> as_result());
+ * @endcode
+ *
+ * @attention
+ * This version is dedicated to be used with string literals.
+ * Because of that the last byte from a literal will be ignored (it's
+ * assumed that this byte contains zero).
+ * But this behavior would lead to unexpected results in such cases:
+ * @code
+ * const char prefix[]{ 'v', 'e', 'r', 's', 'i', 'o', 'n', '=' };
+ *
+ * produce<std::string>(caseless_exact(prefix), token() >> as_result());
+ * @endcode
+ * because the last byte with value '=' will be ignored by
+ * exact_producer. To avoid such behavior string_view_t should be
+ * used explicitely:
+ * @code
+ * produce<std::string>(caseless_exact(string_view_t{prefix}),	token() >> as_result());
+ * @endcode
+ * 
+ * @since v.0.6.9
+ */
+template< std::size_t Size >
+RESTINIO_NODISCARD
+auto
+caseless_exact( const char (&fragment)[Size] )
+{
+	return impl::caseless_exact_fixed_size_fragment_producer_t<Size>{ fragment } >> skip();
 }
 
 //

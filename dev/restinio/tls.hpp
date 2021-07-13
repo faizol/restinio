@@ -135,7 +135,7 @@ template <
 		typename Timer_Factory,
 		typename Logger,
 		typename Request_Handler = default_request_handler_t,
-		typename Strand = asio_ns::strand< asio_ns::executor > >
+		typename Strand = asio_ns::strand< default_asio_executor > >
 using tls_traits_t = traits_t< Timer_Factory, Logger, Request_Handler, Strand, tls_socket_t >;
 
 //
@@ -196,14 +196,17 @@ public:
 		socket_type_dependent_settings_t(
 			socket_type_dependent_settings_t && ) = default;
 
+		//! Setup an exclusive TLS-context for server's settings.
 		Settings &
 		tls_context(
 			asio_ns::ssl::context context ) &
 		{
-			m_tls_context = std::move( context );
+			m_tls_context = std::make_shared< asio_ns::ssl::context >(
+					std::move( context ) );
 			return upcast_reference();
 		}
 
+		//! Setup an exclusive TLS-context for server's settings.
 		Settings &&
 		tls_context(
 			asio_ns::ssl::context context ) &&
@@ -211,10 +214,110 @@ public:
 			return std::move( this->tls_context( std::move( context ) ) );
 		}
 
+		//! Setup a shared TLS-context for server's settings.
+		/*!
+		 * This method can be used when several servers should share
+		 * the same TLS context. Or if TLS should be shared with some
+		 * other entity in an application.
+		 *
+		 * Example:
+		 * @code
+		 * using traits_t = restinio::default_tls_traits_t;
+		 *
+		 * auto tls_context = std::make_shared< asio::ssl::context >(
+		 * 		asio::ssl::context::sslv23 );
+		 * ... // Tuning of tls_context.
+		 *
+		 * restinio::server_settings_t< traits_t > first_settings;
+		 * first_settings.address( "localhost" );
+		 * first_settings.port( 443 );
+		 * first_settings.tls_context( tls_context );
+		 * ...
+		 *
+		 * restinio::server_settings_t< traits_t > second_settings;
+		 * second_settings.address( "localhost" );
+		 * second_settings.port( 5553 );
+		 * second_settings.tls_context( tls_context );
+		 * ...
+		 * @endcode
+		 *
+		 * @since v.0.6.10
+		 */
+		Settings &
+		tls_context(
+			std::shared_ptr< asio_ns::ssl::context > shared_context ) &
+		{
+			m_tls_context = std::move( shared_context );
+			return upcast_reference();
+		}
+
+		//! Setup a shared TLS-context for server's settings.
+		/*!
+		 * This method can be used when several servers should share
+		 * the same TLS context. Or if TLS should be shared with some
+		 * other entity in an application.
+		 *
+		 * Example:
+		 * @code
+		 * using traits_t = restinio::default_tls_traits_t;
+		 *
+		 * auto tls_context = std::make_shared< asio::ssl::context >(
+		 * 		asio::ssl::context::sslv23 );
+		 * ... // Tuning of tls_context.
+		 *
+		 * auto first_server = restinio::run_async< traits_t >(
+		 * 	restinio::own_io_context(),
+		 * 	restinio::server_settings_t< traits_t >{}
+		 * 		.address( "localhost" )
+		 * 		.port( 443 )
+		 * 		.tls_context( tls_context ),
+		 * 	4u );
+		 *
+		 * auto second_server = restinio::run_async< traits_t >(
+		 * 	restinio::own_io_context(),
+		 * 	restinio::server_settings_t< traits_t >{}
+		 * 		.address( "localhost" )
+		 * 		.port( 5553 )
+		 * 		.tls_context( tls_context ),
+		 * 	4u );
+		 * @endcode
+		 *
+		 * @since v.0.6.10
+		 */
+		Settings &&
+		tls_context(
+			std::shared_ptr< asio_ns::ssl::context > shared_context ) &&
+		{
+			return std::move( this->tls_context( std::move(shared_context) ) );
+		}
+
+		//FIXME: should be removed in v.0.7.
+		/*!
+		 * @deprecated
+		 * This method is going to be removed in v.0.7.
+		 * giveaway_tls_context() should be used instead.
+		 */
+		[[deprecated]]
 		asio_ns::ssl::context
 		tls_context()
 		{
-			return asio_ns::ssl::context{ std::move( m_tls_context ) };
+			asio_ns::ssl::context result{ std::move( *m_tls_context ) };
+			m_tls_context.reset();
+
+			return result;
+		}
+
+		//! Get away the TLS-context from settings.
+		/*!
+		 * @note
+		 * This method is intended to be used by RESTinio's internals.
+		 *
+		 * @since v.0.6.10
+		 */
+		std::shared_ptr< asio_ns::ssl::context >
+		giveaway_tls_context()
+		{
+			return std::move(m_tls_context);
 		}
 
 	private:
@@ -224,7 +327,10 @@ public:
 			return static_cast< Settings & >( *this );
 		}
 
-		asio_ns::ssl::context m_tls_context{ asio_ns::ssl::context::sslv23 };
+		std::shared_ptr< asio_ns::ssl::context > m_tls_context{
+				std::make_shared< asio_ns::ssl::context >(
+						asio_ns::ssl::context::sslv23 )
+			};
 };
 
 namespace impl
@@ -251,7 +357,7 @@ class socket_supplier_t< tls_socket_t >
 		socket_supplier_t(
 			Settings & settings,
 			asio_ns::io_context & io_context )
-			:	m_tls_context{ std::make_shared< asio_ns::ssl::context >( settings.tls_context() ) }
+			:	m_tls_context{ settings.giveaway_tls_context() }
 			,	m_io_context{ io_context }
 		{
 			m_sockets.reserve( settings.concurrent_accepts_count() );
@@ -285,7 +391,7 @@ class socket_supplier_t< tls_socket_t >
 		//! The number of sockets that can be used for
 		//! cuncurrent accept operations.
 		auto
-		cuncurrent_accept_sockets_count() const
+		concurrent_accept_sockets_count() const
 		{
 			return m_sockets.size();
 		}

@@ -8,14 +8,15 @@
 
 #pragma once
 
-#include <memory>
-#include <chrono>
-
 #include <http_parser.h>
 
 #include <restinio/connection_state_listener.hpp>
+#include <restinio/incoming_http_msg_limits.hpp>
 
 #include <restinio/utils/suppress_exceptions.hpp>
+
+#include <memory>
+#include <chrono>
 
 namespace restinio
 {
@@ -113,12 +114,22 @@ struct connection_settings_t final
 {
 	using timer_manager_t = typename Traits::timer_manager_t;
 	using timer_manager_handle_t = std::shared_ptr< timer_manager_t >;
-	using request_handler_t = typename Traits::request_handler_t;
+
+	using request_handler_t = request_handler_type_from_traits_t< Traits >;
+
 	using logger_t = typename Traits::logger_t;
 
 	using connection_state_listener_holder_t =
 			connection_settings_details::state_listener_holder_t<
 					typename Traits::connection_state_listener_t >;
+
+	/*!
+	 * @brief An alias for shared-pointer to extra-data-factory.
+	 *
+	 * @since v.0.6.13
+	 */
+	using extra_data_factory_handle_t =
+			std::shared_ptr< typename Traits::extra_data_factory_t >;
 
 	connection_settings_t( const connection_settings_t & ) = delete;
 	connection_settings_t( const connection_settings_t && ) = delete;
@@ -134,6 +145,7 @@ struct connection_settings_t final
 		,	m_request_handler{ settings.request_handler() }
 		,	m_parser_settings{ parser_settings }
 		,	m_buffer_size{ settings.buffer_size() }
+		,	m_incoming_http_msg_limits{ settings.incoming_http_msg_limits() }
 		,	m_read_next_http_message_timelimit{
 				settings.read_next_http_message_timelimit() }
 		,	m_write_http_response_timelimit{
@@ -143,9 +155,13 @@ struct connection_settings_t final
 		,	m_max_pipelined_requests{ settings.max_pipelined_requests() }
 		,	m_logger{ settings.logger() }
 		,	m_timer_manager{ std::move( timer_manager ) }
+		,	m_extra_data_factory{ settings.giveaway_extra_data_factory() }
 	{
 		if( !m_timer_manager )
 			throw exception_t{ "timer manager not set" };
+
+		if( !m_extra_data_factory )
+			throw exception_t{ "extra_data_factory is nullptr" };
 	}
 
 	//! Request handler factory.
@@ -160,6 +176,11 @@ struct connection_settings_t final
 	//! Params from server_settings_t.
 	//! \{
 	std::size_t m_buffer_size;
+
+	/*!
+	 * @since v.0.6.12
+	 */
+	const incoming_http_msg_limits_t m_incoming_http_msg_limits;
 
 	std::chrono::steady_clock::duration
 		m_read_next_http_message_timelimit{ std::chrono::seconds( 60 ) };
@@ -182,9 +203,31 @@ struct connection_settings_t final
 		return m_timer_manager->create_timer_guard();
 	}
 
+	/*!
+	 * @brief Get a reference to extra-data-factory object.
+	 *
+	 * @since v.0.6.13
+	 */
+	RESTINIO_NODISCARD
+	auto &
+	extra_data_factory() const noexcept
+	{
+		return *m_extra_data_factory;
+	}
+
 private:
 	//! Timer factory for timout guards.
 	timer_manager_handle_t m_timer_manager;
+
+	/*!
+	 * @brief A factory for instances of extra-data incorporated into a request.
+	 *
+	 * @attention
+	 * This value is expected to be not-null.
+	 *
+	 * @since v.0.6.13
+	 */
+	extra_data_factory_handle_t m_extra_data_factory;
 };
 
 template < typename Traits >

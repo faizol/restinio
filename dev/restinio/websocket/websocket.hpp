@@ -214,7 +214,7 @@ template <
 ws_handle_t
 upgrade(
 	//! Upgrade request.
-	request_t & req,
+	generic_request_type_from_traits_t<Traits> & req,
 	//! Activation policy.
 	activation_t activation_flag,
 	//! Response header fields.
@@ -253,6 +253,7 @@ upgrade(
 			con.connection_id(),
 			std::move( upgrade_internals.m_settings ),
 			std::move( upgrade_internals.m_socket ),
+			std::move( upgrade_internals.m_lifetime_monitor ),
 			std::move( ws_message_handler ) );
 
 	writable_items_container_t upgrade_response_bufs;
@@ -291,7 +292,7 @@ template <
 		typename WS_Message_Handler >
 auto
 upgrade(
-	request_t & req,
+	generic_request_type_from_traits_t<Traits> & req,
 	activation_t activation_flag,
 	std::string sec_websocket_accept_field_value,
 	WS_Message_Handler ws_message_handler )
@@ -314,7 +315,7 @@ template <
 		typename WS_Message_Handler >
 auto
 upgrade(
-	request_t & req,
+	generic_request_type_from_traits_t<Traits> & req,
 	activation_t activation_flag,
 	std::string sec_websocket_accept_field_value,
 	std::string sec_websocket_protocol_field_value,
@@ -342,7 +343,7 @@ template <
 		typename WS_Message_Handler >
 auto
 upgrade(
-	request_t & req,
+	generic_request_type_from_traits_t<Traits> & req,
 	activation_t activation_flag,
 	WS_Message_Handler ws_message_handler )
 {

@@ -13,3 +13,14 @@ add_subdirectory(ip_blocker)
 
 add_subdirectory(upgrade)
 
+add_subdirectory(chunked_input)
+
+add_subdirectory(acceptor_post_bind_hook)
+
+add_subdirectory(incoming_msg_limits)
+
+add_subdirectory(connection_count_limit)
+
+add_subdirectory(user_data_simple)
+
+add_subdirectory(chained_handlers)

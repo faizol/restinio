@@ -624,20 +624,34 @@ TEST_CASE( "just_result (string case)", "[just_result]" )
 
 	auto parser = produce<std::string>(
 			alternatives(
-				caseless_symbol_p('f') >> just_result("Female"s),
-				caseless_symbol_p('m') >> just_result("Male"s)
+				caseless_exact_p("Fem") >> just_result("Female"s),
+				caseless_exact_p("Mal") >> just_result("Male"s)
 			)
 		);
 
 	{
-		const auto result = try_parse( "f", parser );
+		const auto result = try_parse( "fem", parser );
 
 		REQUIRE( result );
 		REQUIRE( "Female"s == *result );
 	}
 
 	{
-		const auto result = try_parse( "m", parser );
+		const auto result = try_parse( "FEM", parser );
+
+		REQUIRE( result );
+		REQUIRE( "Female"s == *result );
+	}
+
+	{
+		const auto result = try_parse( "mal", parser );
+
+		REQUIRE( result );
+		REQUIRE( "Male"s == *result );
+	}
+
+	{
+		const auto result = try_parse( "MAL", parser );
 
 		REQUIRE( result );
 		REQUIRE( "Male"s == *result );
@@ -670,6 +684,43 @@ TEST_CASE( "convert", "[convert_transformer]" )
 		const auto r = try_parse( "m", parser );
 		REQUIRE( r );
 		REQUIRE( "m"s == *r );
+	}
+}
+
+TEST_CASE( "convert with failures", "[convert_transformer]" )
+{
+	using namespace restinio::easy_parser;
+	using namespace std::string_literals;
+
+	const auto parser = produce<std::string>(
+			any_symbol_p()
+				>> convert([](char c) ->
+						restinio::expected_t< std::string, error_reason_t >
+					{
+						if( 'f' == c || 'm' == c )
+							return std::string(1u, c);
+						else
+							return restinio::make_unexpected(
+									error_reason_t::unexpected_character );
+					})
+				>> as_result()
+		);
+
+	{
+		const auto r = try_parse( "f", parser );
+		REQUIRE( r );
+		REQUIRE( "f"s == *r );
+	}
+
+	{
+		const auto r = try_parse( "m", parser );
+		REQUIRE( r );
+		REQUIRE( "m"s == *r );
+	}
+
+	{
+		const auto r = try_parse( "z", parser );
+		REQUIRE( !r );
 	}
 }
 
@@ -2441,3 +2492,59 @@ TEST_CASE( "comment producer", "[comment_producer]" )
 	}
 }
 
+TEST_CASE( "IPv4 parser", "[non_negative_decimal_number_p]" )
+{
+	namespace ep = restinio::easy_parser;
+
+	const auto one_group = ep::non_negative_decimal_number_p<std::uint8_t>();
+
+	const auto rule = ep::produce<std::uint32_t>(
+			ep::produce< std::array<std::uint8_t, 4> >(
+				ep::repeat(3u, 3u,
+					one_group >> ep::to_container(),
+					ep::symbol('.')),
+				one_group >> ep::to_container()
+			)
+			>> ep::convert( [](const auto & arr) {
+					std::uint32_t result{};
+					for(const auto o : arr) {
+						result <<= 8;
+						result |= o;
+					}
+					return result;
+				} )
+			>> ep::as_result()
+		);
+
+	{
+		const auto result = ep::try_parse( "", rule );
+		REQUIRE( !result );
+	}
+
+	{
+		const auto result = ep::try_parse( "127.0.0.1", rule );
+		REQUIRE( result );
+		REQUIRE( 0x7F000001u == *result );
+	}
+
+	{
+		const auto result = ep::try_parse( "192.168.1.1", rule );
+
+		REQUIRE( result );
+		REQUIRE( 0xC0A80101u == *result );
+	}
+
+	{
+		const auto result = ep::try_parse( "192 168.1.1", rule );
+
+		REQUIRE( !result );
+	}
+
+
+	{
+		const auto result = ep::try_parse( "192.168.1.1.", rule );
+
+		REQUIRE( !result );
+	}
+
+}

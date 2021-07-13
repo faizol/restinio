@@ -17,6 +17,12 @@ MxxRu::Cpp::composite_target {
 		timeouts
 		upgrade
 		user_controlled_output
+		chunked_input
+      acceptor_post_bind_hook
+      incoming_msg_limits
+      connection_count_limit
+      user_data_simple
+      chained_handlers
 	].each do |name|
 		required_prj "test/handle_requests/#{name}/prj.ut.rb"
 	end

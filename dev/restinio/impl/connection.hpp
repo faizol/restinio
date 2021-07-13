@@ -17,6 +17,7 @@
 #include <restinio/exception.hpp>
 #include <restinio/http_headers.hpp>
 #include <restinio/request_handler.hpp>
+#include <restinio/connection_count_limiter.hpp>
 #include <restinio/impl/connection_base.hpp>
 #include <restinio/impl/header_helpers.hpp>
 #include <restinio/impl/response_coordinator.hpp>
@@ -55,11 +56,49 @@ struct http_parser_ctx_t
 	//! Parser context temp values and flags.
 	//! \{
 	std::string m_current_field_name;
+	std::size_t m_last_value_total_size{ 0u };
 	bool m_last_was_value{ true };
+
+	/*!
+	 * @since v.0.6.9
+	 */
+	bool m_leading_headers_completed{ false };
+
+	/*!
+	 * @since v.0.6.9
+	 */
+	chunked_input_info_block_t m_chunked_info_block;
 	//! \}
 
 	//! Flag: is http message parsed completely.
 	bool m_message_complete{ false };
+
+	/*!
+	 * @brief Total number of parsed HTTP-fields.
+	 *
+	 * This number includes the number of leading HTTP-fields and the number
+	 * of trailing HTTP-fields (in the case of chunked encoding).
+	 *
+	 * @since v.0.6.12
+	 */
+	std::size_t m_total_field_count{ 0u };
+
+	/*!
+	 * @brief Limits for the incoming message.
+	 *
+	 * @since v.0.6.12
+	 */
+	const incoming_http_msg_limits_t m_limits;
+
+	/*!
+	 * @brief The main constructor.
+	 *
+	 * @since v.0.6.12
+	 */
+	http_parser_ctx_t(
+		incoming_http_msg_limits_t limits )
+		:	m_limits{ limits }
+	{}
 
 	//! Prepare context to handle new request.
 	void
@@ -68,8 +107,32 @@ struct http_parser_ctx_t
 		m_header = http_request_header_t{};
 		m_body.clear();
 		m_current_field_name.clear();
+		m_last_value_total_size = 0u;
 		m_last_was_value = true;
+		m_leading_headers_completed = false;
 		m_message_complete = false;
+		m_total_field_count = 0u;
+	}
+
+	//! Creates an instance of chunked_input_info if there is an info
+	//! about chunks in the body.
+	/*!
+	 * @since v.0.6.9
+	 */
+	RESTINIO_NODISCARD
+	chunked_input_info_unique_ptr_t
+	make_chunked_input_info_if_necessary()
+	{
+		chunked_input_info_unique_ptr_t result;
+
+		if( !m_chunked_info_block.m_chunks.empty() ||
+				0u != m_chunked_info_block.m_trailing_fields.fields_count() )
+		{
+			result = std::make_unique< chunked_input_info_t >(
+					std::move( m_chunked_info_block ) );
+		}
+
+		return result;
 	}
 };
 
@@ -116,6 +179,16 @@ create_parser_settings() noexcept
 			return restinio_body_cb( parser, at, length );
 		};
 
+	parser_settings.on_chunk_header =
+		[]( http_parser * parser ) -> int {
+			return restinio_chunk_header_cb( parser );
+		};
+
+	parser_settings.on_chunk_complete =
+		[]( http_parser * parser ) -> int {
+			return restinio_chunk_complete_cb( parser );
+		};
+
 	parser_settings.on_message_complete =
 		[]( http_parser * parser ) -> int {
 			return restinio_message_complete_cb< Http_Methods >( parser );
@@ -151,8 +224,11 @@ enum class connection_upgrade_stage_t : std::uint8_t
 //! Data associated with connection read routine.
 struct connection_input_t
 {
-	connection_input_t( std::size_t buffer_size )
-		:	m_buf{ buffer_size }
+	connection_input_t(
+		std::size_t buffer_size,
+		incoming_http_msg_limits_t limits )
+		:	m_parser_ctx{ limits }
+		,	m_buf{ buffer_size }
 	{}
 
 	//! HTTP-parser.
@@ -233,10 +309,13 @@ class connection_t final
 	public:
 		using timer_manager_t = typename Traits::timer_manager_t;
 		using timer_guard_t = typename timer_manager_t::timer_guard_t;
-		using request_handler_t = typename Traits::request_handler_t;
+		using request_handler_t = request_handler_type_from_traits_t< Traits >;
+		using generic_request_t = generic_request_type_from_traits_t< Traits >;
 		using logger_t = typename Traits::logger_t;
 		using strand_t = typename Traits::strand_t;
 		using stream_socket_t = typename Traits::stream_socket_t;
+		using lifetime_monitor_t =
+				typename connection_count_limit_types<Traits>::lifetime_monitor_t;
 
 		connection_t(
 			//! Connection id.
@@ -246,17 +325,23 @@ class connection_t final
 			//! Settings that are common for connections.
 			connection_settings_handle_t< Traits > settings,
 			//! Remote endpoint for that connection.
-			endpoint_t remote_endpoint )
+			endpoint_t remote_endpoint,
+			//! Lifetime monitor to be used for handling connection count.
+			lifetime_monitor_t lifetime_monitor )
 			:	connection_base_t{ conn_id }
 			,	executor_wrapper_base_t{ socket.get_executor() }
 			,	m_socket{ std::move( socket ) }
 			,	m_settings{ std::move( settings ) }
 			,	m_remote_endpoint{ std::move( remote_endpoint ) }
-			,	m_input{ m_settings->m_buffer_size }
+			,	m_input{
+					m_settings->m_buffer_size,
+					m_settings->m_incoming_http_msg_limits
+				}
 			,	m_response_coordinator{ m_settings->m_max_pipelined_requests }
 			,	m_timer_guard{ m_settings->create_timer_guard() }
 			,	m_request_handler{ *( m_settings->m_request_handler ) }
 			,	m_logger{ *( m_settings->m_logger ) }
+			,	m_lifetime_monitor{ std::move(lifetime_monitor) }
 		{
 			// Notify of a new connection instance.
 			m_logger.trace( [&]{
@@ -360,13 +445,16 @@ class connection_t final
 
 			upgrade_internals_t(
 				connection_settings_handle_t< Traits > settings,
-				stream_socket_t socket )
-				:	m_settings{ std::move( settings ) }
+				stream_socket_t socket,
+				lifetime_monitor_t lifetime_monitor )
+				:	m_settings{ std::move(settings) }
 				,	m_socket{ std::move( socket ) }
+				,	m_lifetime_monitor{ std::move(lifetime_monitor) }
 			{}
 
 			connection_settings_handle_t< Traits > m_settings;
 			stream_socket_t m_socket;
+			lifetime_monitor_t m_lifetime_monitor;
 		};
 
 		//! Move socket out of connection.
@@ -375,7 +463,9 @@ class connection_t final
 		{
 			return upgrade_internals_t{
 				m_settings,
-				std::move( m_socket ) };
+				std::move(m_socket),
+				std::move(m_lifetime_monitor)
+			};
 		}
 
 	private:
@@ -573,30 +663,40 @@ class connection_t final
 					// so it is possible to omit this timer scheduling.
 					guard_request_handling_operation();
 
-					if( request_rejected() ==
+					const auto handling_result =
 						m_request_handler(
-							std::make_shared< request_t >(
+							std::make_shared< generic_request_t >(
 								request_id,
 								std::move( parser_ctx.m_header ),
 								std::move( parser_ctx.m_body ),
+								parser_ctx.make_chunked_input_info_if_necessary(),
 								shared_from_concrete< connection_base_t >(),
-								m_remote_endpoint ) ) )
+								m_remote_endpoint,
+								m_settings->extra_data_factory() ) );
+
+					switch( handling_result )
 					{
-						// If handler refused request, say not implemented.
-						write_response_parts_impl(
-							request_id,
-							response_output_flags_t{
-								response_parts_attr_t::final_parts,
-								response_connection_attr_t::connection_close },
-							write_group_t{ create_not_implemented_resp() } );
-					}
-					else if( m_response_coordinator.is_able_to_get_more_messages() )
-					{
-						// Request was accepted,
-						// didn't create immediate response that closes connection after,
-						// and it is possible to receive more requests
-						// then start consuming yet another request.
-						wait_for_http_message();
+						case request_handling_status_t::not_handled:
+						case request_handling_status_t::rejected:
+							// If handler refused request, say not implemented.
+							write_response_parts_impl(
+								request_id,
+								response_output_flags_t{
+									response_parts_attr_t::final_parts,
+									response_connection_attr_t::connection_close },
+								write_group_t{ create_not_implemented_resp() } );
+							break;
+
+						case request_handling_status_t::accepted:
+							if( m_response_coordinator.is_able_to_get_more_messages() )
+							{
+								// Request was accepted,
+								// didn't create immediate response that closes connection after,
+								// and it is possible to receive more requests
+								// then start consuming yet another request.
+								wait_for_http_message();
+							}
+							break;
 					}
 				}
 				else
@@ -683,40 +783,49 @@ class connection_t final
 			m_input.m_connection_upgrade_stage =
 				connection_upgrade_stage_t::wait_for_upgrade_handling_result_or_nothing;
 
-			if( request_rejected() ==
-				m_request_handler(
-					std::make_shared< request_t >(
-						request_id,
-						std::move( parser_ctx.m_header ),
-						std::move( parser_ctx.m_body ),
-						shared_from_concrete< connection_base_t >(),
-						m_remote_endpoint) ) )
+			const auto handling_result = m_request_handler(
+				std::make_shared< generic_request_t >(
+					request_id,
+					std::move( parser_ctx.m_header ),
+					std::move( parser_ctx.m_body ),
+					parser_ctx.make_chunked_input_info_if_necessary(),
+					shared_from_concrete< connection_base_t >(),
+					m_remote_endpoint,
+					m_settings->extra_data_factory() ) );
+			switch( handling_result )
 			{
-				if( m_socket.is_open() )
-				{
-					// Request is rejected, so our socket
-					// must not be moved out to websocket connection.
+				case request_handling_status_t::not_handled:
+				case request_handling_status_t::rejected:
+					if( m_socket.is_open() )
+					{
+						// Request is rejected, so our socket
+						// must not be moved out to websocket connection.
 
-					// If handler refused request, say not implemented.
-					write_response_parts_impl(
-						request_id,
-						response_output_flags_t{
-							response_parts_attr_t::final_parts,
-							response_connection_attr_t::connection_close },
-						write_group_t{ create_not_implemented_resp() } );
-				}
-				else
-				{
-					// Request is rejected, but the socket
-					// was moved out to somewhere else???
+						// If handler refused request, say not implemented.
+						write_response_parts_impl(
+							request_id,
+							response_output_flags_t{
+								response_parts_attr_t::final_parts,
+								response_connection_attr_t::connection_close },
+							write_group_t{ create_not_implemented_resp() } );
+					}
+					else
+					{
+						// Request is rejected, but the socket
+						// was moved out to somewhere else???
 
-					m_logger.error( [&]{
-						return fmt::format(
-								"[connection:{}] upgrade request handler rejects "
-								"request, but socket was moved out from connection",
-								connection_id() );
-					} );
-				}
+						m_logger.error( [&]{
+							return fmt::format(
+									"[connection:{}] upgrade request handler rejects "
+									"request, but socket was moved out from connection",
+									connection_id() );
+						} );
+					}
+					break;
+
+				case request_handling_status_t::accepted:
+					/* nothing to do */
+					break;
 			}
 
 			// Else 2 cases:
@@ -1578,6 +1687,16 @@ class connection_t final
 
 		//! Logger for operation
 		logger_t & m_logger;
+
+		/*!
+		 * @brief Monitor of the connection lifetime.
+		 *
+		 * It's required for controlling the count of active parallel
+		 * connections.
+		 *
+		 * @since v.0.6.12
+		 */
+		lifetime_monitor_t m_lifetime_monitor;
 };
 
 //
@@ -1591,6 +1710,8 @@ class connection_factory_t
 	public:
 		using logger_t = typename Traits::logger_t;
 		using stream_socket_t = typename Traits::stream_socket_t;
+		using lifetime_monitor_t =
+			typename connection_count_limit_types<Traits>::lifetime_monitor_t;
 
 		connection_factory_t(
 			connection_settings_handle_t< Traits > connection_settings,
@@ -1601,12 +1722,14 @@ class connection_factory_t
 		{}
 
 		// NOTE: since v.0.6.3 it returns non-empty
-		// shared_ptr<connection_t<Traits>> or anexception is thrown in
+		// shared_ptr<connection_t<Traits>> or an exception is thrown in
 		// the case of an error.
+		// NOTE: since v.0.6.12 it accepts yet another parameter: lifetime_monitor.
 		auto
 		create_new_connection(
 			stream_socket_t socket,
-			endpoint_t remote_endpoint )
+			endpoint_t remote_endpoint,
+			lifetime_monitor_t lifetime_monitor )
 		{
 			using connection_type_t = connection_t< Traits >;
 
@@ -1619,7 +1742,8 @@ class connection_factory_t
 				m_connection_id_counter++,
 				std::move( socket ),
 				m_connection_settings,
-				std::move( remote_endpoint ) );
+				std::move( remote_endpoint ),
+				std::move( lifetime_monitor ) );
 		}
 
 	private:

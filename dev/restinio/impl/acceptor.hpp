@@ -10,6 +10,8 @@
 
 #include <memory>
 
+#include <restinio/connection_count_limiter.hpp>
+
 #include <restinio/impl/include_fmtlib.hpp>
 
 #include <restinio/impl/connection.hpp>
@@ -80,7 +82,7 @@ class socket_supplier_t
 		//! The number of sockets that can be used for
 		//! cuncurrent accept operations.
 		auto
-		cuncurrent_accept_sockets_count() const noexcept
+		concurrent_accept_sockets_count() const noexcept
 		{
 			return m_sockets.size();
 		}
@@ -161,9 +163,15 @@ class acceptor_t final
 	:	public std::enable_shared_from_this< acceptor_t< Traits > >
 	,	protected socket_supplier_t< typename Traits::stream_socket_t >
 	,	protected acceptor_details::ip_blocker_holder_t< typename Traits::ip_blocker_t >
+	,	protected restinio::connection_count_limits::impl::acceptor_callback_iface_t
 {
 		using ip_blocker_base_t = acceptor_details::ip_blocker_holder_t<
 				typename Traits::ip_blocker_t >;
+
+		using connection_count_limiter_t =
+				typename connection_count_limit_types< Traits >::limiter_t;
+		using connection_lifetime_monitor_t =
+				typename connection_count_limit_types< Traits >::lifetime_monitor_t;
 
 	public:
 		using connection_factory_t = impl::connection_factory_t< Traits >;
@@ -190,11 +198,21 @@ class acceptor_t final
 			,	m_address{ settings.address() }
 			,	m_acceptor_options_setter{ settings.acceptor_options_setter() }
 			,	m_acceptor{ io_context }
+			,	m_acceptor_post_bind_hook{ settings.giveaway_acceptor_post_bind_hook() }
 			,	m_executor{ io_context.get_executor() }
 			,	m_open_close_operations_executor{ io_context.get_executor() }
 			,	m_separate_accept_and_create_connect{ settings.separate_accept_and_create_connect() }
 			,	m_connection_factory{ std::move( connection_factory ) }
 			,	m_logger{ logger }
+			,	m_connection_count_limiter{
+					self_as_acceptor_callback(),
+					restinio::connection_count_limits::max_parallel_connections_t{
+							settings.max_parallel_connections()
+						},
+					restinio::connection_count_limits::max_active_accepts_t{
+							settings.concurrent_accepts_count()
+						}
+				}
 		{}
 
 		//! Start listen on port specified in ctor.
@@ -212,16 +230,10 @@ class acceptor_t final
 
 			asio_ns::ip::tcp::endpoint ep{ m_protocol, m_port };
 
-			if( !m_address.empty() )
-			{
-				auto addr = m_address;
-				if( addr == "localhost" )
-					addr = "127.0.0.1";
-				else if( addr == "ip6-localhost" )
-					addr = "::1";
-
-				ep.address( asio_ns::ip::address::from_string( addr ) );
-			}
+			const auto actual_address = try_extract_actual_address_from_variant(
+					m_address );
+			if( actual_address )
+				ep.address( *actual_address );
 
 			try
 			{
@@ -239,10 +251,18 @@ class acceptor_t final
 				}
 
 				m_acceptor.bind( ep );
+				// Since v.0.6.11 the post-bind hook should be invoked.
+				m_acceptor_post_bind_hook( m_acceptor );
+				// server end-point can be replaced if port is allocated by
+				// the operating system (e.g. zero is specified as port number
+				// by a user).
+				ep = m_acceptor.local_endpoint();
+
+				// Now we can switch acceptor to listen state.
 				m_acceptor.listen( asio_ns::socket_base::max_connections );
 
 				// Call accept connections routine.
-				for( std::size_t i = 0; i< this->cuncurrent_accept_sockets_count(); ++i )
+				for( std::size_t i = 0; i< this->concurrent_accept_sockets_count(); ++i )
 				{
 					m_logger.info( [&]{
 						return fmt::format( "init accept #{}", i );
@@ -298,6 +318,55 @@ class acceptor_t final
 		//! Get executor for acceptor.
 		auto & get_executor() noexcept { return m_executor; }
 
+		// Begin of implementation of acceptor_callback_iface_t.
+		/*!
+		 * @since v.0.6.12
+		 */
+		void
+		call_accept_now( std::size_t index ) noexcept
+		{
+			m_acceptor.async_accept(
+				this->socket( index ).lowest_layer(),
+				asio_ns::bind_executor(
+					get_executor(),
+					[index, ctx = this->shared_from_this()]
+					( const auto & ec ) noexcept
+					{
+						if( !ec )
+						{
+							ctx->accept_current_connection( index, ec );
+						}
+					} ) );
+		}
+
+		/*!
+		 * @since v.0.6.12
+		 */
+		void
+		schedule_next_accept_attempt( std::size_t index ) noexcept
+		{
+			asio_ns::post(
+				asio_ns::bind_executor(
+					get_executor(),
+					[index, ctx = this->shared_from_this()]() noexcept
+					{
+						ctx->accept_next( index );
+					} ) );
+		}
+
+		/*!
+		 * @brief Helper for suppressing warnings of using `this` in
+		 * initilizer list.
+		 *
+		 * @since v.0.6.12
+		 */
+		::restinio::connection_count_limits::impl::acceptor_callback_iface_t *
+		self_as_acceptor_callback() noexcept
+		{
+			return this;
+		}
+		// End of implementation of acceptor_callback_iface_t.
+
 		//! Set a callback for a new connection.
 		/*!
 		 * @note
@@ -311,16 +380,7 @@ class acceptor_t final
 		void
 		accept_next( std::size_t i ) noexcept
 		{
-			m_acceptor.async_accept(
-				this->socket( i ).lowest_layer(),
-				asio_ns::bind_executor(
-					get_executor(),
-					[i, ctx = this->shared_from_this()]( const auto & ec ) noexcept {
-						if( !ec )
-						{
-							ctx->accept_current_connection( i, ec );
-						}
-					} ) );
+			m_connection_count_limiter.accept_next( i );
 		}
 
 		//! Accept current connection.
@@ -419,7 +479,12 @@ class acceptor_t final
 				[sock = std::move(incoming_socket),
 				factory = m_connection_factory,
 				ep = std::move(remote_endpoint),
-				logger = &m_logger]() mutable noexcept {
+				lifetime_monitor = connection_lifetime_monitor_t{
+						&m_connection_count_limiter
+					},
+				logger = &m_logger]
+				() mutable noexcept
+				{
 					// NOTE: this code block shouldn't throw!
 					restinio::utils::suppress_exceptions(
 							*logger,
@@ -430,7 +495,9 @@ class acceptor_t final
 								// the case of an error. Because of that there is
 								// no need to check the value returned.
 								auto conn = factory->create_new_connection(
-										std::move(sock), std::move(ep) );
+										std::move(sock),
+										std::move(ep),
+										std::move(lifetime_monitor) );
 
 								// Start waiting for request message.
 								conn->init();
@@ -473,17 +540,23 @@ class acceptor_t final
 		//! \{
 		const std::uint16_t m_port;
 		const asio_ns::ip::tcp m_protocol;
-		const std::string m_address;
+		const restinio::details::address_variant_t m_address;
 		//! \}
 
 		//! Server port listener and connection receiver routine.
 		//! \{
 		std::unique_ptr< acceptor_options_setter_t > m_acceptor_options_setter;
 		asio_ns::ip::tcp::acceptor m_acceptor;
+
+		//! A hook to be called just after a successful call to bind for acceptor.
+		/*!
+		 * @since v.0.6.11
+		 */
+		acceptor_post_bind_hook_t m_acceptor_post_bind_hook;
 		//! \}
 
 		//! Asio executor.
-		asio_ns::executor m_executor;
+		default_asio_executor m_executor;
 		strand_t m_open_close_operations_executor;
 
 		//! Do separate an accept operation and connection instantiation.
@@ -493,6 +566,46 @@ class acceptor_t final
 		connection_factory_shared_ptr_t m_connection_factory;
 
 		logger_t & m_logger;
+
+		/*!
+		 * @brief Actual limiter of active parallel connections.
+		 *
+		 * @since v.0.6.12
+		 */
+		connection_count_limiter_t m_connection_count_limiter;
+
+		/*!
+		 * @brief Helper for extraction of an actual IP-address from an
+		 * instance of address_variant.
+		 *
+		 * Returns an empty value if there is no address inside @a from.
+		 *
+		 * @since v.0.6.11
+		 */
+		RESTINIO_NODISCARD
+		static optional_t< asio_ns::ip::address >
+		try_extract_actual_address_from_variant(
+			const restinio::details::address_variant_t & from )
+		{
+			optional_t< asio_ns::ip::address > result;
+
+			if( auto * str_v = get_if<std::string>( &from ) )
+			{
+				auto str_addr = *str_v;
+				if( str_addr == "localhost" )
+					str_addr = "127.0.0.1";
+				else if( str_addr == "ip6-localhost" )
+					str_addr = "::1";
+
+				result = asio_ns::ip::address::from_string( str_addr );
+			}
+			else if( auto * addr_v = get_if<asio_ns::ip::address>( &from ) )
+			{
+				result = *addr_v;
+			}
+
+			return result;
+		}
 };
 
 } /* namespace impl */

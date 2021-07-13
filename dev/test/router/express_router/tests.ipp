@@ -1,34 +1,26 @@
-struct fake_connection_t : public restinio::impl::connection_base_t
+#include "../../common/fake_connection.ipp"
+
+template< typename Regex_Engine, typename Extra_Data_Factory >
+auto
+create_fake_request(
+	const restinio::router::generic_express_router_t<Regex_Engine, Extra_Data_Factory> &,
+	std::string target,
+	http_method_id_t method = http_method_get() )
 {
-	fake_connection_t() : restinio::impl::connection_base_t{ 0 }
-	{}
+	using request_t = restinio::generic_request_t<
+			typename Extra_Data_Factory::data_t
+	>;
 
-	virtual void
-	check_timeout( std::shared_ptr< tcp_connection_ctx_base_t > & ) override
-	{}
-
-	virtual void
-	write_response_parts(
-		request_id_t ,
-		response_output_flags_t ,
-		write_group_t ) override
-	{}
-};
-
-
-request_handle_t
-create_fake_request( std::string target, http_method_id_t method = http_method_get() )
-{
-	return
-		std::make_shared< request_t >(
+	Extra_Data_Factory extra_data_factory;
+	return std::make_shared< request_t >(
 			0,
 			http_request_header_t{ method, std::move( target ) },
 			"",
 			std::make_shared< fake_connection_t >(),
 			restinio::endpoint_t{
 				restinio::asio_ns::ip::make_address_v4("127.0.0.1"),
-				3000 } );
-			// restinio::impl::connection_handle_t{ new fake_connection_t} );
+				3000 },
+			extra_data_factory );
 }
 
 TEST_CASE( "Simple named param" , "[express][simple][named_params]" )
@@ -98,22 +90,27 @@ TEST_CASE( "Simple named param" , "[express][simple][named_params]" )
 			return request_accepted();
 		} );
 
-	REQUIRE( request_rejected() == router( create_fake_request( "/xxx" ) ) );
+	REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/xxx" ) ) );
 	REQUIRE( -1 == extract_last_handler_called() );
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/a-route/42" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/a-route/42" ) ) );
 	REQUIRE( 0 == extract_last_handler_called() );
 	check_route_params();
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/b-route/42" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/b-route/42" ) ) );
 	REQUIRE( 1 == extract_last_handler_called() );
 	check_route_params();
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/c-route/42" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/c-route/42" ) ) );
 	REQUIRE( 2 == extract_last_handler_called() );
 	check_route_params();
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/d-route/42" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/d-route/42" ) ) );
 	REQUIRE( 3 == extract_last_handler_called() );
 	check_route_params();
 }
@@ -175,29 +172,33 @@ TEST_CASE( "Simple indexed param" , "[express][simple][indexed_params]" )
 			return request_accepted();
 		} );
 
-	REQUIRE( request_rejected() == router( create_fake_request( "/xxx" ) ) );
+	REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/xxx" ) ) );
 	REQUIRE( -1 == extract_last_handler_called() );
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/a-route/42/ending" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/a-route/42/ending" ) ) );
 	REQUIRE( 0 == extract_last_handler_called() );
 	check_route_params();
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/b-route/42/ending" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/b-route/42/ending" ) ) );
 	REQUIRE( 1 == extract_last_handler_called() );
 	check_route_params();
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/c-route/42/ending" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/c-route/42/ending" ) ) );
 	REQUIRE( 2 == extract_last_handler_called() );
 	check_route_params();
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/d-route/42/ending" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/d-route/42/ending" ) ) );
 	REQUIRE( 3 == extract_last_handler_called() );
 	check_route_params();
 }
 
 TEST_CASE( "Http methods" , "[express][simple][http_methods]" )
 {
-
 	http_method_id_t last_http_method = http_method_unknown();
 
 	auto extract_last_http_method = [&]{
@@ -243,27 +244,36 @@ TEST_CASE( "Http methods" , "[express][simple][http_methods]" )
 			return request_accepted();
 		} );
 
-	REQUIRE( request_rejected() == router( create_fake_request( "/xxx", http_method_delete() ) ) );
-	REQUIRE( request_rejected() == router( create_fake_request( "/xxx", http_method_get() ) ) );
-	REQUIRE( request_rejected() == router( create_fake_request( "/xxx", http_method_head() ) ) );
-	REQUIRE( request_rejected() == router( create_fake_request( "/xxx", http_method_post() ) ) );
-	REQUIRE( request_rejected() == router( create_fake_request( "/xxx", http_method_put() ) ) );
+	REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/xxx", http_method_delete() ) ) );
+	REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/xxx", http_method_get() ) ) );
+	REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/xxx", http_method_head() ) ) );
+	REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/xxx", http_method_post() ) ) );
+	REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/xxx", http_method_put() ) ) );
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_delete() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_delete() ) ) );
 	REQUIRE( http_method_delete() == extract_last_http_method() );
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_get() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_get() ) ) );
 	REQUIRE( http_method_get() == extract_last_http_method() );
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_head() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_head() ) ) );
 	REQUIRE( http_method_head() == extract_last_http_method() );
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_post() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_post() ) ) );
 	REQUIRE( http_method_post() == extract_last_http_method() );
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_put() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_put() ) ) );
 	REQUIRE( http_method_put() == extract_last_http_method() );
 }
 
 TEST_CASE( "Http method matchers" , "[express][http_method_matchers]" )
 {
-
 	http_method_id_t last_http_method = http_method_unknown();
 
 	auto extract_last_http_method = [&]{
@@ -288,22 +298,22 @@ TEST_CASE( "Http method matchers" , "[express][http_method_matchers]" )
 			} );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_delete() ) ) );
+			create_fake_request( router, "/user", http_method_delete() ) ) );
 		REQUIRE( http_method_delete() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_get() ) ) );
+			create_fake_request( router, "/user", http_method_get() ) ) );
 		REQUIRE( http_method_get() == extract_last_http_method() );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_head() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_head() ) ) );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_post() ) ) );
+			create_fake_request( router, "/user", http_method_post() ) ) );
 		REQUIRE( http_method_post() == extract_last_http_method() );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_put() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_put() ) ) );
 	}
 
 	SECTION( "dynamic_any_of_methods-1" )
@@ -333,46 +343,46 @@ TEST_CASE( "Http method matchers" , "[express][http_method_matchers]" )
 			} );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_delete() ) ) );
+			create_fake_request( router, "/user", http_method_delete() ) ) );
 		REQUIRE( http_method_delete() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_get() ) ) );
+			create_fake_request( router, "/user", http_method_get() ) ) );
 		REQUIRE( http_method_get() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_head() ) ) );
+			create_fake_request( router, "/user", http_method_head() ) ) );
 		REQUIRE( http_method_head() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_post() ) ) );
+			create_fake_request( router, "/user", http_method_post() ) ) );
 		REQUIRE( http_method_post() == extract_last_http_method() );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_put() ) ) );
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_copy() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_put() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_copy() ) ) );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/status", http_method_delete() ) ) );
+			create_fake_request( router, "/status", http_method_delete() ) ) );
 		REQUIRE( http_method_delete() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/status", http_method_get() ) ) );
+			create_fake_request( router, "/status", http_method_get() ) ) );
 		REQUIRE( http_method_get() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/status", http_method_head() ) ) );
+			create_fake_request( router, "/status", http_method_head() ) ) );
 		REQUIRE( http_method_head() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/status", http_method_post() ) ) );
+			create_fake_request( router, "/status", http_method_post() ) ) );
 		REQUIRE( http_method_post() == extract_last_http_method() );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/status", http_method_put() ) ) );
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/status", http_method_copy() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/status", http_method_put() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/status", http_method_copy() ) ) );
 	}
 
 	SECTION( "dynamic_any_of_methods-2" )
@@ -394,25 +404,25 @@ TEST_CASE( "Http method matchers" , "[express][http_method_matchers]" )
 			} );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_delete() ) ) );
+			create_fake_request( router, "/user", http_method_delete() ) ) );
 		REQUIRE( http_method_delete() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_get() ) ) );
+			create_fake_request( router, "/user", http_method_get() ) ) );
 		REQUIRE( http_method_get() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_head() ) ) );
+			create_fake_request( router, "/user", http_method_head() ) ) );
 		REQUIRE( http_method_head() == extract_last_http_method() );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_post() ) ) );
+			create_fake_request( router, "/user", http_method_post() ) ) );
 		REQUIRE( http_method_post() == extract_last_http_method() );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_put() ) ) );
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_copy() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_put() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_copy() ) ) );
 	}
 
 	SECTION( "none_of_methods" )
@@ -433,21 +443,21 @@ TEST_CASE( "Http method matchers" , "[express][http_method_matchers]" )
 				return request_accepted();
 			} );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_delete() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_delete() ) ) );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_get() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_get() ) ) );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_head() ) ) );
+			create_fake_request( router, "/user", http_method_head() ) ) );
 		REQUIRE( http_method_head() == extract_last_http_method() );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_post() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_post() ) ) );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_put() ) ) );
+			create_fake_request( router, "/user", http_method_put() ) ) );
 		REQUIRE( http_method_put() == extract_last_http_method() );
 	}
 
@@ -469,21 +479,21 @@ TEST_CASE( "Http method matchers" , "[express][http_method_matchers]" )
 				return request_accepted();
 			} );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_delete() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_delete() ) ) );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_get() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_get() ) ) );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_head() ) ) );
+			create_fake_request( router, "/user", http_method_head() ) ) );
 		REQUIRE( http_method_head() == extract_last_http_method() );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_post() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_post() ) ) );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_put() ) ) );
+			create_fake_request( router, "/user", http_method_put() ) ) );
 		REQUIRE( http_method_put() == extract_last_http_method() );
 	}
 
@@ -505,21 +515,21 @@ TEST_CASE( "Http method matchers" , "[express][http_method_matchers]" )
 				return request_accepted();
 			} );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_delete() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_delete() ) ) );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_get() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_get() ) ) );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_head() ) ) );
+			create_fake_request( router, "/user", http_method_head() ) ) );
 		REQUIRE( http_method_head() == extract_last_http_method() );
 
-		REQUIRE( request_rejected() == router(
-			create_fake_request( "/user", http_method_post() ) ) );
+		REQUIRE( request_not_handled() == router(
+			create_fake_request( router, "/user", http_method_post() ) ) );
 
 		REQUIRE( request_accepted() == router(
-			create_fake_request( "/user", http_method_put() ) ) );
+			create_fake_request( router, "/user", http_method_put() ) ) );
 		REQUIRE( http_method_put() == extract_last_http_method() );
 	}
 }
@@ -559,7 +569,8 @@ TEST_CASE( "Many params" , "[express][named_params][indexed_params]" )
 			return request_accepted();
 		} );
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/717/abcd/99.AA/x" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/717/abcd/99.AA/x" ) ) );
 	REQUIRE( 0 == extract_last_handler_called() );
 
 	{
@@ -575,7 +586,8 @@ TEST_CASE( "Many params" , "[express][named_params][indexed_params]" )
 		REQUIRE( route_params[ "opt" ] == "x" );
 	}
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/news/2017-04-01" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/news/2017-04-01" ) ) );
 	REQUIRE( 1 == extract_last_handler_called() );
 
 	{
@@ -590,7 +602,8 @@ TEST_CASE( "Many params" , "[express][named_params][indexed_params]" )
 		REQUIRE( route_params[ "day" ] == "01" );
 	}
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/events/2017-06-03" ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/events/2017-06-03" ) ) );
 	REQUIRE( 2 == extract_last_handler_called() );
 
 	{
@@ -652,44 +665,54 @@ TEST_CASE( "Non matched request handler" , "[express][non_matched_request_handle
 			return request_accepted();
 		} );
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/xxx", http_method_delete() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/xxx", http_method_delete() ) ) );
 	REQUIRE( request_matched_type == 0 );
 	request_matched_type = -1;
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/xxx", http_method_get() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/xxx", http_method_get() ) ) );
 	REQUIRE( request_matched_type == 0 );
 	request_matched_type = -1;
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/xxx", http_method_head() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/xxx", http_method_head() ) ) );
 	REQUIRE( request_matched_type == 0 );
 	request_matched_type = -1;
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/xxx", http_method_post() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/xxx", http_method_post() ) ) );
 	REQUIRE( request_matched_type == 0 );
 	request_matched_type = -1;
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/xxx", http_method_put() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/xxx", http_method_put() ) ) );
 	REQUIRE( request_matched_type == 0 );
 	request_matched_type = -1;
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_delete() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_delete() ) ) );
 	REQUIRE( request_matched_type == 1 );
 	request_matched_type = -1;
 
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_get() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_get() ) ) );
 	REQUIRE( request_matched_type == 1 );
 	request_matched_type = -1;
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_head() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_head() ) ) );
 	REQUIRE( request_matched_type == 1 );
 	request_matched_type = -1;
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_post() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_post() ) ) );
 	REQUIRE( request_matched_type == 1 );
 	request_matched_type = -1;
 
-	REQUIRE( request_accepted() == router( create_fake_request( "/", http_method_put() ) ) );
+	REQUIRE( request_accepted() == router(
+			create_fake_request( router, "/", http_method_put() ) ) );
 	REQUIRE( request_matched_type == 1 );
 	request_matched_type = -1;
 }
@@ -709,7 +732,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 
 	SECTION( "zero" )
 	{
-		REQUIRE( request_accepted() == router( create_fake_request( "/0/0" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/0/0" ) ) );
 
 		const auto & nps = restinio::router::impl::route_params_accessor_t::named_parameters( route_params );
 		const auto & ips = restinio::router::impl::route_params_accessor_t::indexed_parameters( route_params );
@@ -740,7 +764,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 	SECTION( "int8" )
 	{
 		using int_type_t = std::int8_t;
-		REQUIRE( request_accepted() == router( create_fake_request( "/-128/127" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-128/127" ) ) );
 
 		const auto & nps = restinio::router::impl::route_params_accessor_t::named_parameters( route_params );
 		const auto & ips = restinio::router::impl::route_params_accessor_t::indexed_parameters( route_params );
@@ -755,7 +780,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 		REQUIRE( route_params[ 0 ] == "127" );
 		REQUIRE( restinio::cast_to< int_type_t >( route_params[ 0 ] ) == 127 );
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/-129/128" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-129/128" ) ) );
 		REQUIRE_FALSE( nps.empty() );
 		REQUIRE_FALSE( ips.empty() );
 		REQUIRE( nps[0].first =="named_param" );
@@ -770,7 +796,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 	{
 		using int_type_t = std::uint8_t;
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/0/255" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/0/255" ) ) );
 
 		const auto & nps = restinio::router::impl::route_params_accessor_t::named_parameters( route_params );
 		const auto & ips = restinio::router::impl::route_params_accessor_t::indexed_parameters( route_params );
@@ -785,7 +812,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 		REQUIRE( route_params[ 0 ] == "255" );
 		REQUIRE( restinio::cast_to< int_type_t >( route_params[ 0 ] ) == 255 );
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/-1/256" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-1/256" ) ) );
 		REQUIRE_FALSE( nps.empty() );
 		REQUIRE_FALSE( ips.empty() );
 		REQUIRE( nps[0].first =="named_param" );
@@ -799,7 +827,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 	SECTION( "int16" )
 	{
 		using int_type_t = std::int16_t;
-		REQUIRE( request_accepted() == router( create_fake_request( "/-32768/32767" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-32768/32767" ) ) );
 
 		const auto & nps = restinio::router::impl::route_params_accessor_t::named_parameters( route_params );
 		const auto & ips = restinio::router::impl::route_params_accessor_t::indexed_parameters( route_params );
@@ -814,7 +843,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 		REQUIRE( route_params[ 0 ] == "32767" );
 		REQUIRE( restinio::cast_to< int_type_t >( route_params[ 0 ] ) == 32767 );
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/-32769/32768" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-32769/32768" ) ) );
 		REQUIRE_FALSE( nps.empty() );
 		REQUIRE_FALSE( ips.empty() );
 		REQUIRE( nps[0].first =="named_param" );
@@ -829,7 +859,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 	{
 		using int_type_t = std::uint16_t;
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/0/65535" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/0/65535" ) ) );
 
 		const auto & nps = restinio::router::impl::route_params_accessor_t::named_parameters( route_params );
 		const auto & ips = restinio::router::impl::route_params_accessor_t::indexed_parameters( route_params );
@@ -844,7 +875,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 		REQUIRE( route_params[ 0 ] == "65535" );
 		REQUIRE( restinio::cast_to< int_type_t >( route_params[ 0 ] ) == 65535 );
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/-1/65536" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-1/65536" ) ) );
 		REQUIRE_FALSE( nps.empty() );
 		REQUIRE_FALSE( ips.empty() );
 		REQUIRE( nps[0].first =="named_param" );
@@ -858,7 +890,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 	SECTION( "int32" )
 	{
 		using int_type_t = std::int32_t;
-		REQUIRE( request_accepted() == router( create_fake_request( "/-2147483648/2147483647" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-2147483648/2147483647" ) ) );
 
 		const auto & nps = restinio::router::impl::route_params_accessor_t::named_parameters( route_params );
 		const auto & ips = restinio::router::impl::route_params_accessor_t::indexed_parameters( route_params );
@@ -873,7 +906,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 		REQUIRE( route_params[ 0 ] == "2147483647" );
 		REQUIRE( restinio::cast_to< int_type_t >( route_params[ 0 ] ) == 2147483647 );
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/-2147483649/2147483648" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-2147483649/2147483648" ) ) );
 		REQUIRE_FALSE( nps.empty() );
 		REQUIRE_FALSE( ips.empty() );
 		REQUIRE( nps[0].first =="named_param" );
@@ -888,7 +922,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 	{
 		using int_type_t = std::uint32_t;
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/0/4294967295" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/0/4294967295" ) ) );
 
 		const auto & nps = restinio::router::impl::route_params_accessor_t::named_parameters( route_params );
 		const auto & ips = restinio::router::impl::route_params_accessor_t::indexed_parameters( route_params );
@@ -903,7 +938,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 		REQUIRE( route_params[ 0 ] == "4294967295" );
 		REQUIRE( restinio::cast_to< int_type_t >( route_params[ 0 ] ) == 4294967295UL );
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/-1/4294967296" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-1/4294967296" ) ) );
 		REQUIRE_FALSE( nps.empty() );
 		REQUIRE_FALSE( ips.empty() );
 		REQUIRE( nps[0].first =="named_param" );
@@ -917,7 +953,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 	SECTION( "int64" )
 	{
 		using int_type_t = std::int64_t;
-		REQUIRE( request_accepted() == router( create_fake_request( "/-9223372036854775808/9223372036854775807" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-9223372036854775808/9223372036854775807" ) ) );
 
 		const auto & nps = restinio::router::impl::route_params_accessor_t::named_parameters( route_params );
 		const auto & ips = restinio::router::impl::route_params_accessor_t::indexed_parameters( route_params );
@@ -935,7 +972,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 		REQUIRE( route_params[ 0 ] == "9223372036854775807" );
 		REQUIRE( restinio::cast_to< int_type_t >( route_params[ 0 ] ) == 9223372036854775807LL );
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/-9223372036854775809/9223372036854775808" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-9223372036854775809/9223372036854775808" ) ) );
 		REQUIRE_FALSE( nps.empty() );
 		REQUIRE_FALSE( ips.empty() );
 		REQUIRE( nps[0].first =="named_param" );
@@ -950,7 +988,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 	{
 		using int_type_t = std::uint64_t;
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/0/18446744073709551615" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/0/18446744073709551615" ) ) );
 
 		const auto & nps = restinio::router::impl::route_params_accessor_t::named_parameters( route_params );
 		const auto & ips = restinio::router::impl::route_params_accessor_t::indexed_parameters( route_params );
@@ -965,7 +1004,8 @@ TEST_CASE( "Parameters cast" , "[express][parameters_cast]" )
 		REQUIRE( route_params[ 0 ] == "18446744073709551615" );
 		REQUIRE( restinio::cast_to< int_type_t >( route_params[ 0 ] ) == 18446744073709551615ULL );
 
-		REQUIRE( request_accepted() == router( create_fake_request( "/-1/18446744073709551616" ) ) );
+		REQUIRE( request_accepted() == router(
+				create_fake_request( router, "/-1/18446744073709551616" ) ) );
 		REQUIRE_FALSE( nps.empty() );
 		REQUIRE_FALSE( ips.empty() );
 		REQUIRE( nps[0].first =="named_param" );

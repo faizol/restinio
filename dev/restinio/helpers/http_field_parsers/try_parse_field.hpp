@@ -121,7 +121,7 @@ try_extract_field_value_from(
  *
  * 	const auto auth_field = try_parse_field< authorization_value_t >(
  * 			req, "X-My-Authorization");
- * 	if(auto * auth = restinio::get_it<authorization_value_t>(&auth_field)) {
+ * 	if(auto * auth = restinio::get_if<authorization_value_t>(&auth_field)) {
  * 		// X-My-Authorization is successfully parsed.
  * 		if("basic" == auth->auth_scheme) {
  * 			... // Dealing with basic authentification.
@@ -139,14 +139,18 @@ try_extract_field_value_from(
  * @tparam Parsed_Field_Type The type of field value to be received as the
  * result of successful parse if the field is present.
  *
+ * @tparam Extra_Data The type of extra-data incorporated into an instance
+ * of restinio::generic_request_t. There is no need to specify that type,
+ * it has to be detected automatically by the compiler.
+ *
  * @since v.0.6.8
  */
-template< typename Parsed_Field_Type >
+template< typename Parsed_Field_Type, typename Extra_Data >
 RESTINIO_NODISCARD
 auto 
 try_parse_field(
 	//! A request that should hold a HTTP-field.
-	const request_t & req,
+	const generic_request_t< Extra_Data > & req,
 	//! The name of HTTP-field to be extracted and parsed.
 	string_view_t field_name,
 	//! The default value to be used if HTTP-field is not found.
@@ -175,7 +179,7 @@ try_parse_field(
  *
  * 	const auto auth_field = try_parse_field< authorization_value_t >(
  * 			req, restinio::http_field::authorization);
- * 	if(auto * auth = restinio::get_it<authorization_value_t>(&auth_field)) {
+ * 	if(auto * auth = restinio::get_if<authorization_value_t>(&auth_field)) {
  * 		// Authorization is successfully parsed.
  * 		if("basic" == auth->auth_scheme) {
  * 			... // Dealing with basic authentification.
@@ -193,14 +197,18 @@ try_parse_field(
  * @tparam Parsed_Field_Type The type of field value to be received as the
  * result of successful parse if the field is present.
  *
+ * @tparam Extra_Data The type of extra-data incorporated into an instance
+ * of restinio::generic_request_t. There is no need to specify that type,
+ * it has to be detected automatically by the compiler.
+ *
  * @since v.0.6.8
  */
-template< typename Parsed_Field_Type >
+template< typename Parsed_Field_Type, typename Extra_Data >
 RESTINIO_NODISCARD
 auto 
 try_parse_field(
 	//! A request that should hold a HTTP-field.
-	const request_t & req,
+	const generic_request_t< Extra_Data > & req,
 	//! The ID of a HTTP-field to be extracted and parsed.
 	http_field_t field_id,
 	//! The default value to be used if HTTP-field is not found.

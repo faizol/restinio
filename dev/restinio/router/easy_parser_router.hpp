@@ -46,11 +46,17 @@ struct no_match_t {};
 /*!
  * @brief An interface for one entry of easy_parser-based router.
  *
+ * @tparam Extra_Data The type of extra-data incorporated into a request object.
+ * This type is added to router_entry_t in v.0.6.13.
+ *
  * @since v.0.6.6
  */
+template< typename Extra_Data >
 class router_entry_t
 {
 public:
+	using actual_request_handle_t = generic_request_handle_t< Extra_Data >;
+
 	virtual ~router_entry_t() = default;
 
 	//! An attempt to match a request against the route.
@@ -64,16 +70,21 @@ public:
 	RESTINIO_NODISCARD
 	virtual expected_t< request_handling_status_t, no_match_t >
 	try_handle(
-		const request_handle_t & req,
+		const actual_request_handle_t & req,
 		target_path_holder_t & target_path ) const = 0;
 };
 
 /*!
  * @brief An alias for unique_ptr of router_entry.
  *
+ * @tparam Extra_Data The type of extra-data incorporated into a request object.
+ * This type is added to router_entry_unique_ptr_t in v.0.6.13.
+ *
  * @since v.0.6.6
  */
-using router_entry_unique_ptr_t = std::unique_ptr< router_entry_t >;
+template< typename Extra_Data >
+using router_entry_unique_ptr_t =
+	std::unique_ptr< router_entry_t< Extra_Data > >;
 
 //
 // actual_router_entry_t
@@ -84,13 +95,19 @@ using router_entry_unique_ptr_t = std::unique_ptr< router_entry_t >;
  * @tparam Producer A type of producer that parses a route and produces
  * a value to be used as argument(s) for request handler.
  *
+ * @tparam Extra_Data The type of extra-data incorporated into a request object.
+ * This type is added to actual_router_entry_t in v.0.6.13.
+ *
  * @tparam Handle A type of request handler.
  *
  * @since v.0.6.6
  */
-template< typename Producer, typename Handler >
-class actual_router_entry_t : public router_entry_t
+template< typename Extra_Data, typename Producer, typename Handler >
+class actual_router_entry_t : public router_entry_t< Extra_Data >
 {
+	//FIXME: compatibility between Extra_Data and Handler should be
+	//checked by static_assert. If it's possible.
+
 	//! HTTP method to match.
 	restinio::router::impl::buffered_matcher_holder_t m_method_matcher;
 
@@ -101,6 +118,9 @@ class actual_router_entry_t : public router_entry_t
 	Handler m_handler;
 
 public:
+	using actual_request_handle_t =
+			typename router_entry_t<Extra_Data>::actual_request_handle_t;
+
 	template<
 		typename Method_Matcher,
 		typename Producer_Arg,
@@ -118,7 +138,7 @@ public:
 	RESTINIO_NODISCARD
 	expected_t< request_handling_status_t, no_match_t >
 	try_handle(
-		const request_handle_t & req,
+		const actual_request_handle_t & req,
 		target_path_holder_t & target_path ) const override
 	{
 		if( m_method_matcher->match( req->header().method() ) )
@@ -527,11 +547,11 @@ class path_to_tuple_producer_t
 public:
 	using base_type_t::base_type_t;
 
-	template< typename Handler >
+	template< typename Extra_Data, typename Handler >
 	RESTINIO_NODISCARD
 	static auto
 	invoke_handler(
-		const request_handle_t & req,
+		const generic_request_handle_t< Extra_Data > & req,
 		Handler && handler,
 		typename base_type_t::result_type & type )
 	{
@@ -544,12 +564,13 @@ namespace path_to_params_details
 
 template<
 	typename F,
+	typename Extra_Data,
 	typename Tuple,
 	std::size_t... Indexes >
 decltype(auto)
 call_with_tuple_impl(
 	F && what,
-	const request_handle_t & req,
+	const generic_request_handle_t< Extra_Data > & req,
 	Tuple && params,
 	std::index_sequence<Indexes...> )
 {
@@ -568,11 +589,11 @@ call_with_tuple_impl(
  *
  * @since v.0.6.6
  */
-template< typename F, typename Tuple >
+template< typename F, typename Extra_Data, typename Tuple >
 decltype(auto)
 call_with_tuple(
 	F && what,
-	const request_handle_t & req,
+	const generic_request_handle_t< Extra_Data > & req,
 	Tuple && params )
 {
 	return call_with_tuple_impl(
@@ -609,11 +630,11 @@ class path_to_params_producer_t
 public:
 	using base_type_t::base_type_t;
 
-	template< typename Handler >
+	template< typename User_Type, typename Handler >
 	RESTINIO_NODISCARD
 	static auto
 	invoke_handler(
-		const request_handle_t & req,
+		const generic_request_handle_t< User_Type > & req,
 		Handler && handler,
 		typename base_type_t::result_type & type )
 	{
@@ -846,15 +867,31 @@ unescape()
 } /* namespace easy_parser_router */
 
 //
-// easy_parser_router_t
+// generic_easy_parser_router_t
 //
 /*!
- * @brief A request router that uses easy_parser for matching requests
+ * @brief A generic request router that uses easy_parser for matching requests
  * with handlers.
+ *
+ * @note
+ * That type is intended to be used when extra-data-factory for server traits
+ * is not the default one. If your server uses the default extra-data-factory
+ * then easy_parser_router_t should be used for the simplicity.
  *
  * Usage example:
  * @code
- * using router_t = restinio::router::easy_parser_router_t;
+ * struct my_extra_data_factory {
+ * 	// Type of data to be incorporated into request object.
+ * 	struct data_t {...};
+ *
+ * 	// Factory function for data_t.
+ * 	void make_within( restinio::extra_data_buffer_t<data_t> buf ) {
+ * 		new(buf.get()) data_t{...};
+ * 	}
+ * };
+ *
+ * using router_t = restinio::router::generic_easy_parser_router_t<
+ * 		my_extra_data_factory >;
  * namespace epr = restinio::router::easy_parser_router;
  *
  * auto make_router(...) {
@@ -892,6 +929,7 @@ unescape()
  * }
  * ...
  * struct traits_t : public restinio::default_traits_t {
+ * 	using extra_data_factory_t = my_extra_data_factory;
  * 	using request_handler_t = router_t;
  * }
  * ...
@@ -902,24 +940,33 @@ unescape()
  * );
  * @endcode
  *
- * @since v.0.6.6
+ * @tparam Extra_Data_Factory The type of user-type-factory. This type should
+ * be the same as the `traits::user_type_factory_t` type for the server.
+ *
+ * @since v.0.6.6, v.0.6.13
  */
-class easy_parser_router_t
+template< typename Extra_Data_Factory >
+class generic_easy_parser_router_t
 {
+	using extra_data_t = typename Extra_Data_Factory::data_t;
+
 public:
-	easy_parser_router_t() = default;
+	using actual_request_handle_t = generic_request_handle_t< extra_data_t >;
 
-	easy_parser_router_t( const easy_parser_router_t & ) = delete;
-	easy_parser_router_t &
-	operator=( const easy_parser_router_t & ) = delete;
+	generic_easy_parser_router_t() = default;
 
-	easy_parser_router_t( easy_parser_router_t && ) = default;
-	easy_parser_router_t &
-	operator=( easy_parser_router_t && ) = default;
+	generic_easy_parser_router_t(
+		const generic_easy_parser_router_t & ) = delete;
+	generic_easy_parser_router_t &
+	operator=( const generic_easy_parser_router_t & ) = delete;
+
+	generic_easy_parser_router_t( generic_easy_parser_router_t && ) = default;
+	generic_easy_parser_router_t &
+	operator=( generic_easy_parser_router_t && ) = default;
 
 	RESTINIO_NODISCARD
 	request_handling_status_t
-	operator()( request_handle_t req ) const
+	operator()( actual_request_handle_t req ) const
 	{
 		using namespace easy_parser_router::impl;
 
@@ -946,7 +993,7 @@ public:
 			return m_non_matched_request_handler( std::move( req ) );
 		}
 
-		return request_rejected();
+		return request_not_handled();
 	}
 
 	template<
@@ -965,7 +1012,7 @@ public:
 		using handler_type = std::decay_t< Handler >;
 
 		using actual_entry_type = actual_router_entry_t<
-				producer_type, handler_type >;
+				extra_data_t, producer_type, handler_type >;
 
 		auto entry = std::make_unique< actual_entry_type >(
 				std::forward<Method_Matcher>(method_matcher),
@@ -1042,20 +1089,89 @@ public:
 
 	//! Set handler for requests that don't match any route.
 	void
-	non_matched_request_handler( non_matched_request_handler_t nmrh )
+	non_matched_request_handler(
+		generic_non_matched_request_handler_t< extra_data_t > nmrh )
 	{
 		m_non_matched_request_handler= std::move( nmrh );
 	}
 
 private:
-	using entries_container_t =
-			std::vector< easy_parser_router::impl::router_entry_unique_ptr_t >;
+	using entries_container_t = std::vector<
+			easy_parser_router::impl::router_entry_unique_ptr_t< extra_data_t >
+	>;
 
 	entries_container_t m_entries;
 
 	//! Handler that is called for requests that don't match any route.
-	non_matched_request_handler_t m_non_matched_request_handler;
+	generic_non_matched_request_handler_t< extra_data_t >
+			m_non_matched_request_handler;
 };
+
+//
+// easy_parser_router_t
+//
+/*!
+ * @brief A request router that uses easy_parser for matching requests
+ * with handlers.
+ *
+ * @note
+ * That type is intended to be used when the default extra-data-factory is
+ * specified in you server's traits.
+ *
+ * Usage example:
+ * @code
+ * using router_t = restinio::router::easy_parser_router_t;
+ * namespace epr = restinio::router::easy_parser_router;
+ *
+ * auto make_router(...) {
+ * 	auto router = std::make_unique<router_t>();
+ * 	...
+ * 	router->http_get(epr::path_to_params(...),
+ * 		[](const auto & req, ...) {...});
+ * 	router->http_post(epr::path_to_params(...),
+ * 		[](const auto & req, ...) {...});
+ * 	router->http_delete(epr::path_to_params(...),
+ * 		[](const auto & req, ...) {...});
+ *
+ * 	router->add_handler(
+ * 		restinio::http_method_lock(),
+ * 		epr::path_to_params(...),
+ * 		[](const auto & req, ...) {...});
+ *
+ * 	router->add_handler(
+ * 		restinio::router::any_of_methods(
+ * 			restinio::http_method_get(),
+ * 			restinio::http_method_delete(),
+ * 			restinio::http_method_post()),
+ * 		epr::path_to_params(...),
+ * 		[](const auto & req, ...) {...});
+ *
+ * 	router->add_handler(
+ * 		restinio::router::none_of_methods(
+ * 			restinio::http_method_get(),
+ * 			restinio::http_method_delete(),
+ * 			restinio::http_method_post()),
+ * 		epr::path_to_params(...),
+ * 		[](const auto & req, ...) {...});
+ *
+ * 	return router;
+ * }
+ * ...
+ * struct traits_t : public restinio::default_traits_t {
+ * 	using request_handler_t = router_t;
+ * }
+ * ...
+ * restinio::run(
+ * 	restinio::on_this_thread<traits_t>()
+ * 		.request_handler(make_router)
+ * 		...
+ * );
+ * @endcode
+ *
+ * @since v.0.6.6
+ */
+using easy_parser_router_t =
+		generic_easy_parser_router_t< no_extra_data_factory_t >;
 
 } /* namespace router */
 

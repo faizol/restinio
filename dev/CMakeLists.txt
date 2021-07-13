@@ -19,7 +19,9 @@ option(RESTINIO_INSTALL_BENCHES "Build install samples." ${RESTINIO_MASTER_PROJE
 option(RESTINIO_FIND_DEPS "Use `find_package()` for including RESTinio dependencies." OFF)
 option(RESTINIO_FMT_HEADER_ONLY "Include fmt library as header-only." ON)
 
-option(RESTINIO_ALLOW_SOBJECTIZER "Allow add_subdirectory(so_5) in the main RESTinio CMakeLists.txt" ${RESTINIO_MASTER_PROJECT})
+option(RESTINIO_ALLOW_SOBJECTIZER "Allow usage of SObjectizer" ${RESTINIO_MASTER_PROJECT})
+
+option(RESTINIO_USE_EXTERNAL_SOBJECTIZER "Allow add_subdirectory(so_5) in the main RESTinio CMakeLists.txt" OFF)
 
 # Since v.0.6.5 a user can force usage of already installed http-parser
 # library.
@@ -41,10 +43,15 @@ SET(RESTINIO_USE_BOOST_ASIO_VALUES "none;static;shared")
 
 set_property(CACHE RESTINIO_USE_BOOST_ASIO PROPERTY STRINGS ${RESTINIO_USE_BOOST_ASIO_VALUES})
 
-IF ((RESTINIO_TEST OR RESTINIO_SAMPLE OR RESTINIO_BENCH)
-		AND (NOT RESTINIO_ALLOW_SOBJECTIZER))
-	message(FATAL_ERROR "RESTINIO_ALLOW_SOBJECTIZER can't be OFF if RESTINIO_TEST or RESTINIO_SAMPLE or RESTINIO_BENCH is used")
-ENDIF ()
+project(RESTinioRootProject CXX)
+
+IF (RESTINIO_USE_EXTERNAL_SOBJECTIZER AND NOT RESTINIO_ALLOW_SOBJECTIZER)
+	message(FATAL_ERROR "RESTINIO_USE_EXTERNAL_SOBJECTIZER can't be set without RESTINIO_ALLOW_SOBJECTIZER")
+ENDIF()
+
+IF (RESTINIO_ALLOW_SOBJECTIZER)
+	SET(RESTINIO_SOBJECTIZER_ENABLED ON)
+ENDIF()
 
 IF (RESTINIO_MASTER_PROJECT)
 	# RESTinio is a main project (not subproject)
@@ -52,6 +59,7 @@ IF (RESTINIO_MASTER_PROJECT)
 
 	list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/modules")
 	include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/link_threads_if_necessary.cmake")
+	include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/link_atomic_if_necessary.cmake")
 
 	# ------------------------------------------------------------------------------
 	# RESTinio dependencies:
@@ -159,11 +167,16 @@ IF (RESTINIO_MASTER_PROJECT)
 
 	# ------------------------------------------------------------------------------
 	# SObjectizer
-	IF (RESTINIO_ALLOW_SOBJECTIZER)
-		SET(SOBJECTIZER_BUILD_STATIC ON)
+	IF (RESTINIO_SOBJECTIZER_ENABLED)
+		IF (RESTINIO_USE_EXTERNAL_SOBJECTIZER)
+			find_package(sobjectizer)
+		ELSE ()
+			SET(SOBJECTIZER_BUILD_STATIC ON)
+			add_subdirectory(so_5)
+		ENDIF ()
 		SET(SOBJECTIZER_LIBS sobjectizer::StaticLib)
-		add_subdirectory(so_5)
-	ENDIF ()
+	ENDIF()
+
 
 	# ------------------------------------------------------------------------------
 	# Zlib

@@ -4,6 +4,7 @@ set(UNITTEST_SRCFILES
 	media-type.cpp
 	content-type.cpp
 	cache-control.cpp
+	connection.cpp
 	content-encoding.cpp
 	accept.cpp
 	accept-charset.cpp
@@ -13,6 +14,8 @@ set(UNITTEST_SRCFILES
 	content-disposition.cpp
 	range.cpp
 	user-agent.cpp
+	transfer-encoding.cpp
+	host.cpp
 )
 include(${CMAKE_SOURCE_DIR}/cmake/unittest.cmake)
 
